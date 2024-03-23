@@ -10,12 +10,10 @@ export class RemoteSerialportServer implements IRemoteSerialportServer {
     private serialport_map: Map<string, SerialPort> = new Map();
 
     private io: SocketServer;
-    private io_server_options?: Partial<ServerOptions>;
 
     constructor(socket_server_options?: Partial<ServerOptions>, server_port: number = 17991, serialport_namespace_regexp: RegExp | string = /^(\/dev\/tty(USB|AMA|ACM)|COM)[0-9]+$/) {
         this.SERVER_PORT = server_port;
         this.SERIALPORT_NAMESPACE_REGEXP = serialport_namespace_regexp;
-        this.io_server_options = socket_server_options;
         this.io = new SocketServer(socket_server_options);
     }
 
