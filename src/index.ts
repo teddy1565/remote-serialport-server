@@ -1,59 +1,58 @@
-import { Server } from "socket.io";
+
+import { ServerOptions, Server as SocketServer } from "socket.io";
 import { SerialPort } from "serialport";
+import { IRemoteSerialportServer } from "./index.d";
 
-const SOCKET_SERVER_PORT = 17991;
+export class RemoteSerialportServer implements IRemoteSerialportServer {
+    public SERVER_PORT: number;
+    public SERIALPORT_NAMESPACE_REGEXP: RegExp | string;
 
-/**
- *  Of namespce like /dev/tty* or /dev/usb* or COM* or /dev/ttyUSB* or /dev/ttyACM*
- */
-const SERIALPORT_NAMESPACE_REGEXP = /^(\/dev\/tty(USB|AMA|ACM)|COM)[0-9]+$/;
+    private serialport_map: Map<string, SerialPort> = new Map();
 
-const io = new Server({
-    cors: {
-        allowedHeaders: ["*"],
-        origin: "*",
-        methods: ["GET", "POST", "PUT", "DELETE"]
+    private io: SocketServer;
+    private io_server_options?: Partial<ServerOptions>;
+
+    constructor(socket_server_options?: Partial<ServerOptions>, server_port: number = 17991, serialport_namespace_regexp: RegExp | string = /^(\/dev\/tty(USB|AMA|ACM)|COM)[0-9]+$/) {
+        this.SERVER_PORT = server_port;
+        this.SERIALPORT_NAMESPACE_REGEXP = serialport_namespace_regexp;
+        this.io_server_options = socket_server_options;
+        this.io = new SocketServer(socket_server_options);
     }
-});
 
-io.listen(SOCKET_SERVER_PORT);
+    start(): void {
+        this.io.listen(this.SERVER_PORT);
+        console.log(`Socket Server Listening on Port ${this.SERVER_PORT}`);
 
-console.log(`Socket Server Listening on Port ${SOCKET_SERVER_PORT}`);
+        this.io.of(this.SERIALPORT_NAMESPACE_REGEXP).on("connection", async (socket) => {
+            const select_serialport_path = socket.nsp.name;
+            console.log(`Socket Connected to Server on Port ${this.SERVER_PORT}, of: ${socket.nsp.name}`);
+            socket.on("disconnect", () => {
+                console.log("Socket Disconnected");
+            });
 
-io.on("connection", (socket) => {
-    console.log(`Socket Connected to Server on Port ${SOCKET_SERVER_PORT}, of: /`);
-    socket.on("disconnect", () => {
-        console.log("Socket Disconnected");
-    });
-});
-
-io.of(SERIALPORT_NAMESPACE_REGEXP).on("connection", async (socket) => {
-    const select_serialport_path = socket.nsp.name;
-    console.log(`Socket Connected to Server on Port ${SOCKET_SERVER_PORT}, of: ${socket.nsp.name}`);
-    socket.on("disconnect", () => {
-        console.log("Socket Disconnected");
-    });
-
-    let serialport: SerialPort | null = null;
-    try {
-        const serialport_list = await SerialPort.list();
-        const selected_serialport = serialport_list.find((serialport) => serialport.path === select_serialport_path);
-        if (!selected_serialport) {
-            throw new Error(`Serial Port ${select_serialport_path} Not Found`);
-        }
-        serialport = new SerialPort({
-            path: selected_serialport.path,
-            baudRate: 9600
+            try {
+                const serialport_list = await SerialPort.list();
+                const selected_serialport = serialport_list.find((serialport) => serialport.path === select_serialport_path);
+                if (!selected_serialport) {
+                    throw new Error(`Serial Port ${select_serialport_path} Not Found`);
+                }
+                const serialport = new SerialPort({
+                    path: selected_serialport.path,
+                    baudRate: 9600
+                });
+                this.serialport_map.set(select_serialport_path, serialport);
+            } catch (error) {
+                console.log(error);
+                return socket.disconnect();
+            }
         });
-    } catch (error) {
-        console.log(error);
-        return socket.disconnect();
     }
 
-    serialport.on("open", () => {
-        console.log(`Serial Port ${select_serialport_path} Opened`);
-    });
-    serialport.on("close", () => {
-        console.log(`Serial Port ${select_serialport_path} Closed`);
-    });
-});
+    on(event: string, listener: (...args: any[]) => void): void {
+        this.io.on(event, listener);
+    }
+
+    of(namespace: RegExp | string) {
+        return this.io.of(namespace);
+    }
+}
