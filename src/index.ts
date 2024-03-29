@@ -5,11 +5,25 @@ import { RemoteSerialServerSocketNamespace, RemoteSerialServerSocket } from "./m
 import { AbsRemoteSerialServer } from "./types/remote-serialport-types/src/remote-serial-server.model";
 import { DefaultEventsMap } from "socket.io/dist/typed-events";
 
-function namespace_convert_to_serialport_path(namespace: string): string {
+
+export function namespace_convert_to_serialport_path(namespace: string): string {
     if (namespace.match(/^(\/COM)[0-9]+$/) !== null) {
         return namespace.replace("/", "");
     }
     return namespace;
+}
+
+/**
+ * @description
+ * After RemoteSerialportSocket Return the Serial Port Path, Validate the Serial Port Path
+ * @param serialport_path - serial port path
+ * @param rule - regular expression to validate the serial port path
+ */
+export function serialport_path_validate(serialport_path: string, rule: string | RegExp = /^(\/dev\/tty(USB|AMA|ACM)|COM)[0-9]+$/): boolean {
+    if (serialport_path.match(rule) === null || serialport_path === "") {
+        return false;
+    }
+    return true;
 }
 
 export class RemoteSerialportServer extends AbsRemoteSerialServer<RemoteSerialServerSocket, RemoteSerialServerSocketNamespace> {
@@ -40,6 +54,10 @@ export class RemoteSerialportServer extends AbsRemoteSerialServer<RemoteSerialSe
         this.SERVER_PORT = server_port;
         this.SERIALPORT_NAMESPACE_REGEXP = serialport_namespace_regexp;
         this.io = new SocketServer(socket_server_options);
+    }
+
+    static serialport_path_validate(serialport_path: string, rule: string | RegExp = /^(\/dev\/tty(USB|AMA|ACM)|COM)[0-9]+$/): boolean {
+        return serialport_path_validate(serialport_path, rule);
     }
 
 }
