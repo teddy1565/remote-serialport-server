@@ -1,0 +1,3 @@
+[submodule "src/types/remote-serialport-types"]
+	path = src/types/remote-serialport-types
+	url = https://github.com/teddy1565/remote-serialport-types.git
