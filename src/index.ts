@@ -46,6 +46,20 @@ export function serialport_path_validate(serialport_path: string, rule: string |
 
 /**
  * @description
+ * Remote Serial Port Server Manager, Manage If you have multiple Remote Serial Port Server
+ *
+ * for example, you have 2 Remote Serial Port Server, one is for the production line, another is for the testing line
+ *
+ * or you have 2 Remote Serial Port Server, one is for the modbus, another is for the bluetooth
+ */
+export class RemoteSerialportServerManager {
+
+    constructor() {
+    }
+}
+
+/**
+ * @description
  * Remote Serial Port Server Class
  */
 export class RemoteSerialportServer extends AbsRemoteSerialServer<RemoteSerialServerSocket, RemoteSerialServerSocketNamespace> {
@@ -84,7 +98,4 @@ export class RemoteSerialportServer extends AbsRemoteSerialServer<RemoteSerialSe
 
 }
 
-export class RemoteSerialportServerManager {
-    constructor() {
-    }
-}
+
