@@ -56,7 +56,7 @@ export class RemoteSerialServerSocketNamespace extends AbsRemoteSerialServerSock
     }
 
     on(channel: SocketIONamespaceOnEvent, listener: (socket: RemoteSerialServerSocket) => void): void {
-        this._namespace.on(channel, (socket: Socket): void => {
+        this._namespace.on<SocketIONamespaceOnEvent>(channel, (socket: Socket): void => {
             listener(new RemoteSerialServerSocket(socket));
         });
     }
