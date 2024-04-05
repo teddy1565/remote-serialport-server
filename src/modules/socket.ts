@@ -1,12 +1,25 @@
 import { AbsRemoteSerialServer, AbsRemoteSerialServerSocket, AbsRemoteSerialServerSocketNamespace } from "../types/remote-serialport-types/src/remote-serial-server.model";
 import { SocketServerSideEmitChannel,
-    SocketServerSideEmitPayloadCode,
-    SocketClientSideEmitPayloadType,
-    SocketServerSideEmitPayloadType,
-    SocketClientSideEmitPayloadCode,
+    SocketServerSideEmitPayload,
+    SocketClientSideEmitPayload,
     SocketClientSideEmitChannel,
     SocketIONamespaceOnEvent } from "../types/remote-serialport-types/src/index";
 import { Socket, Namespace } from "socket.io";
+
+import { SerialPort,
+    ByteLengthParser,
+    CCTalkParser,
+    InterByteTimeoutParser,
+    PacketLengthParser,
+    ReadlineParser,
+    ReadyParser,
+    RegexParser,
+    SlipEncoder,
+    SpacePacketParser,
+    SerialPortMock,
+    SerialPortMockOpenOptions,
+    SerialPortOpenOptions,
+    DelimiterParser } from "serialport";
 
 
 export class RemoteSerialServerSocket extends AbsRemoteSerialServerSocket {
@@ -20,20 +33,50 @@ export class RemoteSerialServerSocket extends AbsRemoteSerialServerSocket {
     constructor(socket: Socket) {
         super();
         this._socket = socket;
+
     }
-    emit(channel: "serialport_event", message: Extract<SocketServerSideEmitPayloadCode, "serialport_close" | "serialport_open">): void;
-    emit(channel: "serialport_result", message: Extract<SocketServerSideEmitPayloadCode, "serialport_not_found" | "serialport_found">): void;
-    emit(channel: "serialport_action", message: Extract<SocketServerSideEmitPayloadCode, "serialport_packet">): void;
-    emit(channel: "serialport_packet", message: Buffer | ArrayBuffer | Array<number>): void;
-    emit(channel: SocketServerSideEmitChannel, message: SocketServerSideEmitPayloadType): void {
+    /**
+     * Server-side emit to client-side
+     *
+     * serialport_event indicates an event from the serial port, like `handshake`, `open`, `close`, `error`, `waiting`, etc.
+     */
+    emit(channel: "serialport_event", message: SocketServerSideEmitPayload): void;
+
+    /**
+     * Server-side emit to client-side
+     *
+     * serialport_result indicates the result of an action from the server.
+     *
+     * e.g. If Client-side want to Extract and Transmit the serial port data, when the server-side finish the action, it will emit this channel.
+     */
+    emit(channel: "serialport_result", message: SocketServerSideEmitPayload): void;
+
+    /**
+     * Server-side emit to client-side
+     *
+     * serialport_action indicates an action from the server, like `open`, `close`, `send`, etc.
+     *
+     * e.g. If Server-side want control the serial port, it will emit this channel.
+     */
+    emit(channel: "serialport_action", message: SocketServerSideEmitPayload): void;
+
+    /**
+     * Server-side emit to client-side
+     *
+     * serialport_packet indicates the serialport buffer packet from the serial port.
+     *
+     * It is an one-way transmission from server-side to client-side.
+     */
+    emit(channel: "serialport_packet", message: SocketServerSideEmitPayload): void;
+    emit(channel: SocketServerSideEmitChannel, message: SocketServerSideEmitPayload): void {
         this._socket.emit(channel, message);
     }
 
-    on(channel: SocketClientSideEmitChannel, listener: (message: SocketClientSideEmitPayloadType) => void): void {
+    on(channel: SocketClientSideEmitChannel, listener: (message: SocketClientSideEmitPayload) => void): void {
         this._socket.on(channel, listener);
     }
 
-    once(channel: SocketClientSideEmitChannel, listener: (message: SocketClientSideEmitPayloadType) => void): void {
+    once(channel: SocketClientSideEmitChannel, listener: (message: SocketClientSideEmitPayload) => void): void {
         this._socket.once(channel, listener);
     }
 
