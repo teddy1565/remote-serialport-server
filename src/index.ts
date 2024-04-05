@@ -18,7 +18,12 @@ import { RemoteSerialServerSocketNamespace, RemoteSerialServerSocket } from "./m
 import { AbsRemoteSerialServer } from "./types/remote-serialport-types/src/remote-serial-server.model";
 import { DefaultEventsMap } from "socket.io/dist/typed-events";
 
-
+/**
+ * @description
+ * Convert Socket.io Namespace to Serial Port Path
+ * @param namespace - string
+ * @returns string
+ */
 export function namespace_convert_to_serialport_path(namespace: string): string {
     if (namespace.match(/^(\/COM)[0-9]+$/) !== null) {
         return namespace.replace("/", "");
@@ -39,6 +44,10 @@ export function serialport_path_validate(serialport_path: string, rule: string |
     return true;
 }
 
+/**
+ * @description
+ * Remote Serial Port Server Class
+ */
 export class RemoteSerialportServer extends AbsRemoteSerialServer<RemoteSerialServerSocket, RemoteSerialServerSocketNamespace> {
     protected SERVER_PORT: number;
 
@@ -79,36 +88,3 @@ export class RemoteSerialportServerManager {
     constructor() {
     }
 }
-
-
-// public start(): void {
-//     this.io.listen(this.SERVER_PORT);
-//     console.log(`Socket Server Listening on Port ${this.SERVER_PORT}`);
-
-//     this.io.of(this.SERIALPORT_NAMESPACE_REGEXP).on("connection", async (socket) => {
-//         const select_serialport_path = namespace_convert_to_serialport_path(socket.nsp.name);
-
-//         console.log(`Socket Connected to Server on Port ${this.SERVER_PORT}, of: ${socket.nsp.name}`);
-
-//         socket.on("disconnect", () => {
-//             console.log("Socket Disconnected");
-//         });
-
-//         try {
-//             const serialport_list = await SerialPort.list();
-//             const selected_serialport = serialport_list.find((serialport) => serialport.path === select_serialport_path);
-//             if (selected_serialport === undefined) {
-//                 socket.emit("")
-//                 throw new Error(`Serial Port ${select_serialport_path} Not Found`);
-//             }
-//             const serialport = new SerialPort({
-//                 path: selected_serialport.path,
-//                 baudRate: 9600
-//             });
-//             this.serialport_map.set(select_serialport_path, serialport);
-//         } catch (error) {
-//             console.log(error);
-//             return socket.disconnect();
-//         }
-//     });
-// }
