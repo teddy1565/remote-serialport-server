@@ -1,8 +1,17 @@
 import { AbsRemoteSerialServer, AbsRemoteSerialServerSocket, AbsRemoteSerialServerSocketNamespace } from "../types/remote-serialport-types/src/remote-serial-server.model";
 import { SocketServerSideEmitChannel,
     SocketServerSideEmitPayload,
+    SocketServerSideEmitPayload_SerialPort_Open,
+    SocketServerSideEmitPayload_SerialPort_Close,
+    SocketServerSideEmitPayload_SerialPort_Packet,
+    SocketServerSideEmitPayload_SerialPort_Error,
+    SocketServerSideEmitPayload_SerialPort_Found,
+    SocketServerSideEmitPayload_SerialPort_NotFound,
+    SocketServerSideEmitPayload_RemoteSerialServerHandshake,
+    SocketServerSideEmitPayload_SerialPort_InitResult,
     SocketClientSideEmitPayload,
     SocketClientSideEmitChannel,
+    SocketClientSideEmitPayload_SerialPort_Handshake,
     SocketIONamespaceOnEvent } from "../types/remote-serialport-types/src/index";
 import { Socket, Namespace } from "socket.io";
 
@@ -21,10 +30,10 @@ import { SerialPort,
     SerialPortOpenOptions,
     DelimiterParser } from "serialport";
 
-
 export class RemoteSerialServerSocket extends AbsRemoteSerialServerSocket {
     protected _socket: Socket;
 
+    public port: SerialPort | SerialPortMock | null = null;
     /**
      * @description
      * package for socket.io socket, maybe use 'Proxy' in the future
@@ -34,13 +43,51 @@ export class RemoteSerialServerSocket extends AbsRemoteSerialServerSocket {
         super();
         this._socket = socket;
 
+        /**
+         * According to past development experience, memory leak problems may occur here, and more observation is needed.
+         */
+        this.once("serialport_handshake", (message) => {
+            if (message.code === "serialport_handshake" && message.data !== undefined && message.data !== null && typeof message.data === "object") {
+                message.data.path = this.serialport_path;
+                message.data.autoOpen = false;
+                this.port = new SerialPort(message.data);
+                this.port.open((error) => {
+                    if (error) {
+                        this.emit("serialport_init_result", {
+                            code: "serialport_init_result",
+                            data: false,
+                            message: error.message
+                        });
+                    } else {
+                        this.emit("serialport_init_result", {
+                            code: "serialport_init_result",
+                            data: true,
+                            message: "Serial Port Initialization Successful"
+                        });
+                    }
+                });
+            } else {
+                this.emit("serialport_init_result", {
+                    code: "serialport_init_result",
+                    data: false,
+                    message: "Serial Port Initialization Failed, In Handshake Stage"
+                });
+            }
+        });
+
+        this.emit("serialport_handshake", {
+            code: "handshake",
+            data: true,
+            message: "Serial Port Handshake"
+        });
+
     }
     /**
      * Server-side emit to client-side
      *
      * serialport_event indicates an event from the serial port, like `handshake`, `open`, `close`, `error`, `waiting`, etc.
      */
-    emit(channel: "serialport_event", message: SocketServerSideEmitPayload): void;
+    emit(channel: "serialport_event", message: SocketServerSideEmitPayload & (SocketServerSideEmitPayload_SerialPort_Found | SocketServerSideEmitPayload_SerialPort_NotFound | SocketServerSideEmitPayload_SerialPort_Error)): void;
 
     /**
      * Server-side emit to client-side
@@ -49,7 +96,7 @@ export class RemoteSerialServerSocket extends AbsRemoteSerialServerSocket {
      *
      * e.g. If Client-side want to Extract and Transmit the serial port data, when the server-side finish the action, it will emit this channel.
      */
-    emit(channel: "serialport_result", message: SocketServerSideEmitPayload): void;
+    emit(channel: "serialport_result", message: SocketServerSideEmitPayload & (SocketServerSideEmitPayload_SerialPort_Open | SocketServerSideEmitPayload_SerialPort_Close)): void;
 
     /**
      * Server-side emit to client-side
@@ -67,7 +114,21 @@ export class RemoteSerialServerSocket extends AbsRemoteSerialServerSocket {
      *
      * It is an one-way transmission from server-side to client-side.
      */
-    emit(channel: "serialport_packet", message: SocketServerSideEmitPayload): void;
+    emit(channel: "serialport_packet", message: SocketServerSideEmitPayload & SocketServerSideEmitPayload_SerialPort_Packet): void;
+
+    /**
+     * When the server-side is ready to handle the client-side, it will emit this channel.
+     * @param channel
+     * @param message
+     */
+    emit(channel: "serialport_handshake", message: SocketServerSideEmitPayload & SocketServerSideEmitPayload_RemoteSerialServerHandshake): void;
+
+    /**
+     * When Handshake is done, the server-side will emit this channel to indicate the initialization result.
+     * @param channel
+     * @param message
+     */
+    emit(channel: "serialport_init_result", message: SocketServerSideEmitPayload & SocketServerSideEmitPayload_SerialPort_InitResult): void;
     emit(channel: SocketServerSideEmitChannel, message: SocketServerSideEmitPayload): void {
         this._socket.emit(channel, message);
     }
