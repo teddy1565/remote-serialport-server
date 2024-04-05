@@ -63,7 +63,7 @@ export class RemoteSerialportServerManager {
  * Remote Serial Port Server Class
  */
 export class RemoteSerialportServer extends AbsRemoteSerialServer<RemoteSerialServerSocket, RemoteSerialServerSocketNamespace> {
-    protected SERVER_PORT: number;
+    protected readonly SERVER_PORT: number;
 
     /**
      * @description
@@ -73,16 +73,43 @@ export class RemoteSerialportServer extends AbsRemoteSerialServer<RemoteSerialSe
      * @example
      * /^(\/dev\/tty(USB|AMA|ACM)|\/COM)[0-9]+$/;
      */
-    protected SERIALPORT_NAMESPACE_REGEXP: RegExp | string;
+    protected readonly SERIALPORT_NAMESPACE_REGEXP: RegExp | string;
 
-    public io: SocketServer;
+    public readonly io: SocketServer;
+
+    /**
+     * @description
+     * Map for Remote Serial Server Socket instance, key is socket id.
+     */
+    private readonly socket_map: Map<string, RemoteSerialServerSocket> = new Map();
+
+    /**
+     * @description
+     * Map for Remote Serial Server Socket Namespace instance, key is namespace.
+     *
+     * The main purpose of the current design is to reduce memory usage and allow the same namespace to access the same instance.
+     */
+    private readonly namespace_map: Map<string, RemoteSerialServerSocketNamespace> = new Map();
 
     protected create_remote_serial_server_socket_namespace(namespace: Namespace<DefaultEventsMap, DefaultEventsMap, DefaultEventsMap, any>): RemoteSerialServerSocketNamespace {
-        return new RemoteSerialServerSocketNamespace(namespace);
+        if (this.namespace_map.has(namespace.name)) {
+            return this.namespace_map.get(namespace.name) as RemoteSerialServerSocketNamespace;
+        }
+
+        const remote_serial_server_namespce_instance = new RemoteSerialServerSocketNamespace(namespace);
+        this.namespace_map.set(namespace.name, remote_serial_server_namespce_instance);
+
+        return remote_serial_server_namespce_instance;
     }
 
     protected create_remote_serial_server_socket_port(socket: Socket): RemoteSerialServerSocket {
-        return new RemoteSerialServerSocket(socket);
+        if (this.socket_map.has(socket.id)) {
+            return this.socket_map.get(socket.id) as RemoteSerialServerSocket;
+        }
+
+        const remote_serial_server_socket_instance = new RemoteSerialServerSocket(socket);
+        this.socket_map.set(socket.id, remote_serial_server_socket_instance);
+        return remote_serial_server_socket_instance;
     }
 
     constructor(socket_server_options?: Partial<ServerOptions>, server_port: number = 17991, serialport_namespace_regexp: RegExp | string = /^(\/dev\/tty(USB|AMA|ACM)|\/COM)[0-9]+$/) {
