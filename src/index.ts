@@ -1,19 +1,6 @@
 
 import { Namespace, ServerOptions, Server as SocketServer, Socket } from "socket.io";
-import { SerialPort,
-    ByteLengthParser,
-    CCTalkParser,
-    InterByteTimeoutParser,
-    PacketLengthParser,
-    ReadlineParser,
-    ReadyParser,
-    RegexParser,
-    SlipEncoder,
-    SpacePacketParser,
-    SerialPortMock,
-    SerialPortMockOpenOptions,
-    SerialPortOpenOptions,
-    DelimiterParser } from "serialport";
+
 import { RemoteSerialServerSocketNamespace, RemoteSerialServerSocket } from "./modules/socket";
 import { AbsRemoteSerialServer } from "./types/remote-serialport-types/src/remote-serial-server.model";
 import { DefaultEventsMap } from "socket.io/dist/typed-events";
