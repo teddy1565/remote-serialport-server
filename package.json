@@ -1,8 +1,9 @@
 {
     "name": "node-serialport-server",
-    "version": "0.0.1",
+    "version": "0.0.3",
     "description": "Remote serialport server, Current In Developing",
     "main": "dist/index.js",
+    "types": "dist/index.d.ts",
     "files": [
         "dist"
     ],
