@@ -30,10 +30,98 @@ import { SerialPort,
     SerialPortOpenOptions,
     DelimiterParser } from "serialport";
 
+import EventEmitter from "events";
+
+
+export class RemoteSerialServerSocketPortEventEmitter extends EventEmitter {
+    constructor() {
+        super();
+    }
+
+    /**
+     * @description
+     * send data chunk to the event emitter, let outside can listen the data chunk
+     * @param eventName
+     * @param chunk
+     * @returns
+     */
+    emit(eventName: "data", chunk: any): boolean {
+        return super.emit(eventName, chunk);
+    }
+
+    /**
+     * @description
+     * listen the buffer command
+     * @param channel - write-command
+     * @param listener
+     */
+    on(channel: "write-command", listener: (command: Buffer) => void): this;
+    /**
+     * @description
+     * Read-only data chunk
+     * @param channel - data
+     * @param listener - data chunk
+     * @returns - this
+     */
+    on(channel: "data", listener: (data: any) => void): this;
+    on(channel: string, listener: (...args: any[]) => void): this  {
+        super.on(channel, listener);
+        return this;
+    }
+
+    /**
+     * @description
+     * listen the buffer command
+     * @param channel
+     * @param listener
+     */
+    once(channel: "write-command", listener: (command: Buffer) => void): this;
+
+    /**
+     * @description
+     * Read-only data chunk
+     * @param channel - data
+     * @param listener - data chunk
+     * @returns - this
+     */
+    once(channel: "data", listener: (data: any) => void): this;
+    once(channel: string, listener: (...args: any[]) => void): this {
+        super.once(channel, listener);
+        return this;
+    }
+
+    /**
+     * @description
+     * Send serialport buffer command to server-side real socket
+     * @param data - data chunk
+     */
+    write(data: Buffer): void {
+        super.emit("write-command", data);
+    }
+}
+
+
 export class RemoteSerialServerSocket extends AbsRemoteSerialServerSocket {
     protected _socket: Socket;
 
-    public port: SerialPort | SerialPortMock | null = null;
+    /**
+     * @description
+     * use protected to prevent direct access, because can't ensure the port is not null
+     */
+    protected _port: SerialPort | SerialPortMock | null = null;
+
+    /**
+     * @description
+     * an event emitter for proxy the serial port event
+     */
+    private readonly port_event_emitter: RemoteSerialServerSocketPortEventEmitter = new RemoteSerialServerSocketPortEventEmitter();
+
+    /**
+     * @description
+     * If initial fail or port, socket error, it will be true
+     */
+    private is_broken_port: boolean = false;
+
     /**
      * @description
      * package for socket.io socket, maybe use 'Proxy' in the future
@@ -50,19 +138,27 @@ export class RemoteSerialServerSocket extends AbsRemoteSerialServerSocket {
             if (message.code === "serialport_handshake" && message.data !== undefined && message.data !== null && typeof message.data === "object") {
                 message.data.path = this.serialport_path;
                 message.data.autoOpen = false;
-                this.port = new SerialPort(message.data);
-                this.port.open((error) => {
+                this._port = new SerialPort(message.data);
+                this._port.open((error) => {
                     if (error) {
                         this.emit("serialport_init_result", {
                             code: "serialport_init_result",
                             data: false,
                             message: error.message
                         });
+                        this.is_broken_port = true;
                     } else {
                         this.emit("serialport_init_result", {
                             code: "serialport_init_result",
                             data: true,
                             message: "Serial Port Initialization Successful"
+                        });
+
+                        this._port?.on("data", (chunk) => {
+                            this.port.emit("data", chunk);
+                        });
+                        this.port_event_emitter.on("write-command", (command) => {
+                            this._port?.write(command);
                         });
                     }
                 });
@@ -72,9 +168,15 @@ export class RemoteSerialServerSocket extends AbsRemoteSerialServerSocket {
                     data: false,
                     message: "Serial Port Initialization Failed, In Handshake Stage"
                 });
+                this.is_broken_port = true;
             }
         });
 
+        /**
+         * @description
+         *
+         * Send handshake signal to the client-side, let client-side know the server-side is ready to handle the client-side
+         */
         this.emit("serialport_handshake", {
             code: "handshake",
             data: true,
@@ -82,6 +184,23 @@ export class RemoteSerialServerSocket extends AbsRemoteSerialServerSocket {
         });
 
     }
+
+    /**
+     * @description
+     * Proxy the serial port instance, read-only data chunk
+     */
+    get port(): RemoteSerialServerSocketPortEventEmitter {
+        return this.port_event_emitter;
+    }
+
+    /**
+     * @description
+     * If initial fail or port, socket error, it will be true
+     */
+    get is_broken(): boolean {
+        return this.is_broken_port;
+    }
+
     /**
      * Server-side emit to client-side
      *

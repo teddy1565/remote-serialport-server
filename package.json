@@ -14,7 +14,7 @@
         "build-prod": "tsc --project ./tsconfig.json",
         "build": "npm run build-prod",
         "build-and-publish": "tsc --build && npm publish",
-        "test": "jest"
+        "ci-test": "jest"
     },
     "repository": {
         "type": "git",
