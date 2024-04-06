@@ -60,9 +60,10 @@ This Project is divided into three parts:
 
 ### Server
 
-```typescript
-// develop simple document
-import { RemoteSerialportServer } from "../index";
+```javascript
+
+const { RemoteSerialportServer } = require("node-serialport-server");
+
 const server_options = {
     cors: {
         allowedHeaders: ["*"],
@@ -75,9 +76,9 @@ const server = new RemoteSerialportServer(server_options, 17991);
 server.listen();
 
 server.of().on("connection", (socket) => {
-    if (RemoteSerialportServer.serialport_path_validate(socket.serialport_path)) {
-        console.log(`Serial Port Path: ${socket.serialport_path} is Valid`);
-    }
+    socket.port.on("data", (data) => {
+        socket.emit("serialport_packet", data);
+    });
 });
 
 
