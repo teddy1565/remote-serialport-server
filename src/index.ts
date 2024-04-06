@@ -106,6 +106,12 @@ export class RemoteSerialportServer extends AbsRemoteSerialServer<RemoteSerialSe
         this.io = new SocketServer(socket_server_options);
     }
 
+    /**
+     * @description
+     * After RemoteSerialportSocket Return the Serial Port Path, Validate the Serial Port Path
+     * @param serialport_path - serial port path
+     * @param rule - regular expression to validate the serial port path
+     */
     static serialport_path_validate(serialport_path: string, rule: string | RegExp = /^(\/dev\/tty(USB|AMA|ACM)|COM)[0-9]+$/): boolean {
         return serialport_path_validate(serialport_path, rule);
     }
