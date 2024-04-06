@@ -3,6 +3,7 @@
     "version": "0.0.2",
     "description": "Remote serialport server, Current In Developing",
     "main": "dist/index.js",
+    "types": "dist/index.d.ts",
     "files": [
         "dist"
     ],
