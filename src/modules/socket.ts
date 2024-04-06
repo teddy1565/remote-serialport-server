@@ -124,12 +124,32 @@ export class RemoteSerialServerSocket extends AbsRemoteSerialServerSocket {
 
     /**
      * @description
+     * debug mode, show more information
+     */
+    private _debug_mode: boolean = false;
+
+    /**
+     * @description
      * package for socket.io socket, maybe use 'Proxy' in the future
      * @param socket - socket.io socket
      */
     constructor(socket: Socket) {
         super();
         this._socket = socket;
+
+        /**
+         * @description
+         * If socket disconnect, release serial port resource
+         */
+        this._socket.once("disconnect", (reason, description) => {
+            this._port?.close((close_error) => {
+                if (this._debug_mode === true) {
+                    console.log(close_error);
+                }
+                this._port?.destroy();
+                this._port = null;
+            });
+        });
 
         /**
          * According to past development experience, memory leak problems may occur here, and more observation is needed.
