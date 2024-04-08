@@ -11,6 +11,8 @@ import { SocketServerSideEmitChannel,
     SocketServerSideEmitPayload_SerialPort_InitResult,
     SocketClientSideEmitPayload,
     SocketClientSideEmitChannel,
+    SocketClientSideEmitChannel_SerialPortAction_SendPacket,
+    SocketClientSideEmitPayload_SerialPort_SendPacket,
     SocketClientSideEmitPayload_SerialPort_Handshake,
     SocketIONamespaceOnEvent } from "../types/remote-serialport-types/src/index";
 import { Socket, Namespace } from "socket.io";
@@ -272,12 +274,23 @@ export class RemoteSerialServerSocket extends AbsRemoteSerialServerSocket {
         this._socket.emit(channel, message);
     }
 
-    on(channel: SocketClientSideEmitChannel, listener: (message: SocketClientSideEmitPayload) => void): void {
-        this._socket.on(channel, listener);
+    on(channel: Extract<SocketClientSideEmitChannel, SocketClientSideEmitChannel_SerialPortAction_SendPacket>, listener: (message: SocketClientSideEmitPayload_SerialPort_SendPacket) => void): void;
+    on(channel: Exclude<SocketClientSideEmitChannel, SocketClientSideEmitChannel_SerialPortAction_SendPacket>, listener: (message: Exclude<SocketClientSideEmitPayload, SocketClientSideEmitPayload_SerialPort_SendPacket>) => void): void;
+    on(channel: SocketClientSideEmitChannel, listener: (message: any) => void): void {
+        if (channel === "serialport_send_packet") {
+            this._socket.on(channel as Extract<SocketClientSideEmitChannel, SocketClientSideEmitChannel_SerialPortAction_SendPacket>, listener as (message: Extract<SocketClientSideEmitPayload, SocketClientSideEmitPayload_SerialPort_SendPacket>) => void);
+        } else {
+            this._socket.on(channel as Exclude<SocketClientSideEmitChannel, SocketClientSideEmitChannel_SerialPortAction_SendPacket>, listener as (message: Exclude<SocketClientSideEmitPayload, SocketClientSideEmitPayload_SerialPort_SendPacket>) => void);
+        }
     }
-
-    once(channel: SocketClientSideEmitChannel, listener: (message: SocketClientSideEmitPayload) => void): void {
-        this._socket.once(channel, listener);
+    once(channel: Extract<SocketClientSideEmitChannel, SocketClientSideEmitChannel_SerialPortAction_SendPacket>, listener: (message: SocketClientSideEmitPayload_SerialPort_SendPacket) => void): void;
+    once(channel: Exclude<SocketClientSideEmitChannel, SocketClientSideEmitChannel_SerialPortAction_SendPacket>, listener: (message: Exclude<SocketClientSideEmitPayload, SocketClientSideEmitPayload_SerialPort_SendPacket>) => void): void;
+    once(channel: SocketClientSideEmitChannel, listener: (message: any) => void): void {
+        if (channel === "serialport_send_packet") {
+            this._socket.once(channel as Extract<SocketClientSideEmitChannel, SocketClientSideEmitChannel_SerialPortAction_SendPacket>, listener as (message: Extract<SocketClientSideEmitPayload, SocketClientSideEmitPayload_SerialPort_SendPacket>) => void);
+        } else {
+            this._socket.once(channel as Exclude<SocketClientSideEmitChannel, SocketClientSideEmitChannel_SerialPortAction_SendPacket>, listener as (message: Exclude<SocketClientSideEmitPayload, SocketClientSideEmitPayload_SerialPort_SendPacket>) => void);
+        }
     }
 
     disconnect(close?: boolean | undefined): void {
