@@ -446,6 +446,281 @@ IPC transport differences vs socket.io:
 Use IPC when both sides live in the same Node process tree (worker threads, Electron utility
 process). Use socket.io for cross-host / cross-network.
 
+#### Raw TCP / Unix Domain Socket / Named Pipe (`RawTcpServer`)
+
+A length-prefix-framed JSON envelope transport over `net.Socket`. Use when you want minimal
+dependency footprint, run on a closed LAN where you don't need socket.io's HTTP polling
+fallback, or want to talk through an OS-level pipe (UDS / Named Pipe) instead of TCP.
+
+```javascript
+const { RemoteSerialportServer, RawTcpServer } = require("node-serialport-server");
+
+// Plain TCP, mux mode (default — many namespaces share one connection)
+new RemoteSerialportServer(undefined, 0, {
+    transport_server: new RawTcpServer({ port: 17993 }),
+    auto_pipe: true
+});
+
+// TLS over TCP
+new RawTcpServer({ port: 17994 }, { tls: { key, cert } });
+
+// 1-to-1 (one connection per namespace, IPC-like)
+new RawTcpServer({ port: 17995 }, { mode: "single-namespace" });
+
+// UDS (Linux/Mac) / Named Pipe (Windows) — `path` instead of `port`
+new RawTcpServer({ path: "/tmp/rsp.sock" });                  // *nix
+new RawTcpServer({ path: "\\\\.\\pipe\\rsp" });               // Windows
+```
+
+`RawTcpServerOptions`:
+
+| Option | Default | What it does |
+|---|---|---|
+| `mode` | `"mux"` | `"mux"`: 1 TCP connection multiplexes many namespaces via envelope `ns` field (socket.io-like). `"single-namespace"`: 1 TCP connection = 1 namespace, bound at hello time (IPC-like). |
+| `tls` | — | `tls.TlsOptions` (`{ key, cert, ca, ... }`). Pass to enable TLS; omit for plain TCP. Ignored when target uses `path:` (UDS / Named Pipe have no TLS concept — file permissions are the security boundary). |
+| `keep_alive` | `true` (30 s) | TCP keepalive. `false` disables; `{ initial_delay_ms }` customises. |
+| `permissions` | — | Octal `chmod` for UDS path after `listen()` (e.g. `0o660`). No-op for TCP / Pipe. |
+| `logger` | default | Inject your `Logger`. |
+
+**Wire format** (per frame): `[4 bytes BE total len][4 bytes BE json len][JSON envelope][optional binary tail]`. Binary tail carries Buffer payloads on hot channels (`serialport_packet`, mux/txn data) directly without JSON-encoding — avoids the 4 KB → 20 KB inflation that naïve JSON-of-Buffer suffers. Other envelopes are plain JSON.
+
+**Transport differences** for Raw TCP vs the other built-ins:
+
+| Behavior | socket.io | Node IPC | Raw TCP (plain/TLS) | Raw TCP (UDS / Pipe) |
+|---|---|---|---|---|
+| Reconnect | auto-reconnect, RPC replay | none (single-shot) | none (single-shot) | none (single-shot) |
+| Wire backpressure | `bufferedAmount` sampling | `null` (skipped) | `socket.writableLength` | `socket.writableLength` |
+| Endpoint multiplexing | one namespace per `of()` | single endpoint (use mux mode) | mode-controlled | mode-controlled |
+| TLS | external (https.Server) | OS-level only | built-in `{ tls: ... }` | OS-level only (file perms) |
+| Browser support | yes | no | no | no |
+
+**Throughput / latency (localhost, Node 24, 4 KB device-emit chunks)**:
+
+| | Throughput | RTT p50 / p99 |
+|---|---|---|
+| Raw WebSocket (mux, plain) | 44.16 MB/s | 0.46 / 2.33 ms |
+| socket.io | 18.18 MB/s | 0.66 / 1.67 ms |
+| HTTP/2 (h2c) | 16.92 MB/s | 0.48 / **1.48 ms** |
+| WebRTC DataChannel (loopback, no NAT) | 12.79 MB/s | 0.67 / 3.35 ms |
+| Raw TCP (mux, plain) | 11.72 MB/s | **0.40** / 3.71 ms |
+| gRPC (insecure) | 6.80 MB/s | 1.34 / 14.87 ms |
+| Node IPC (worker_threads) | 4.70 MB/s | n/a (single-process) |
+| MQTT (aedes broker localhost) | 4.24 MB/s | 2.62 / 11.99 ms |
+
+`ws` has tighter binary framing than Engine.IO; socket.io wins overall stability via its extra layers; HTTP/2 has the **best p99** (per-stream flow control = no head-of-line blocking); Raw TCP wins p50 by stack thinness. WebRTC localhost numbers don't reflect real-world deployment — add NAT/ICE/TURN cost in production. gRPC pays per-message protobuf overhead — middle of the pack on throughput, slower p99 from the extra framing. MQTT pays a broker round-trip per direction — slowest of the bunch, but you get pub-sub semantics and broker persistence for free.
+
+#### Raw WebSocket (`RawWebSocketServer`)
+
+Same envelope + framing as Raw TCP, but delivered over the `ws` library's WebSocket protocol.
+Use when you want a TCP-only socket.io replacement (no HTTP polling fallback, no Engine.IO),
+need browser clients, or want to share a port with an existing HTTP server (you can attach to
+your own `http.Server` instead of letting the constructor make one).
+
+```javascript
+const { RemoteSerialportServer, RawWebSocketServer } = require("node-serialport-server");
+
+// Plain ws://, mux mode (default)
+new RemoteSerialportServer(undefined, 0, {
+    transport_server: new RawWebSocketServer({ port: 17996 }),
+    auto_pipe: true
+});
+
+// TLS (wss://)
+new RawWebSocketServer({ port: 17997 }, { tls: { key, cert } });
+
+// 1-to-1 namespace mode
+new RawWebSocketServer({ port: 17998 }, { mode: "single-namespace" });
+
+// Custom HTTP path (default "/")
+new RawWebSocketServer({ port: 17999, path: "/rsp" });
+```
+
+`RawWebSocketServerOptions`:
+
+| Option | Default | What it does |
+|---|---|---|
+| `mode` | `"mux"` | Same semantics as Raw TCP: `"mux"` shares one ws across many namespaces; `"single-namespace"` is 1 ws = 1 namespace. |
+| `tls` | — | `tls.TlsOptions`. When set, the underlying HTTP server is upgraded to HTTPS and the URL becomes `wss://`. |
+| `logger` | default | Inject your `Logger`. |
+
+The client is `RawWebSocketClient` (see [client README](../remote-serialport-client/README.md#raw-websocket-rawwebsocketclient)).
+
+#### HTTP/2 (`Http2Server`)
+
+Uses Node's built-in `node:http2`. Each namespace = one HTTP/2 stream within a session, so
+HTTP/2's native stream multiplexing IS the mux model — there is no `mode` option. Each stream
+has its own flow-control window, which means a slow consumer on one namespace can't head-of-line
+block traffic on another (best p99 of all built-in transports).
+
+```javascript
+const { RemoteSerialportServer, Http2Server } = require("node-serialport-server");
+
+// h2 over TLS (recommended; ALPN "h2")
+new RemoteSerialportServer(undefined, 0, {
+    transport_server: new Http2Server({ port: 17996 }, { tls: { key, cert } }),
+    auto_pipe: true
+});
+
+// h2c cleartext (trusted internal networks only — most non-Node clients refuse h2c)
+new Http2Server({ port: 17997 });
+```
+
+`Http2ServerOptions`:
+
+| Option | Default | What it does |
+|---|---|---|
+| `tls` | — | `http2.SecureServerOptions`. When set the server runs h2 over TLS with `allowHTTP1: false`. When absent the server runs h2c cleartext. |
+| `logger` | default | Inject your `Logger`. |
+
+The `:path` header on each incoming stream is treated as the namespace label. So `server.of("/dev/ttyUSB0").on("connection", ...)` matches client streams opened with `:path: /dev/ttyUSB0`. The client class (`Http2Client`) sets `:path` automatically from the `label` you pass to `open(label)`.
+
+#### MQTT broker pattern (`MqttServer`)
+
+Connects to an external MQTT broker (mosquitto / EMQX / HiveMQ / aedes / NATS-MQTT / etc.) and
+turns the broker into the wire. Topic conventions (default prefix `"rsp"`):
+
+```text
+<prefix>/c2s/<client_id>/<label>     client → server (incl. the `hello` envelope)
+<prefix>/s2c/<client_id>/<label>     server → client
+```
+
+The server subscribes to `<prefix>/c2s/+/#` (multi-level wildcard catches labels containing `/`),
+demultiplexes on `(client_id, label)`, and routes to the matching endpoint registered via
+`server.of(label)`.
+
+```javascript
+const { RemoteSerialportServer, MqttServer } = require("node-serialport-server");
+
+new RemoteSerialportServer(undefined, 0, {
+    transport_server: new MqttServer({
+        broker_url: "mqtt://broker.internal:1883",
+        topic_prefix: "rsp",            // optional, default "rsp"
+        qos: 1,                          // QoS 0 will lose bytes; do not use for serial streams
+        mqtt_options: { username: "u", password: "p" }
+    }),
+    auto_pipe: true
+});
+```
+
+`MqttServerOptions`:
+
+| Option | Default | What it does |
+|---|---|---|
+| `broker_url` | (required) | e.g. `mqtt://host:1883` or `mqtts://host:8883`. |
+| `topic_prefix` | `"rsp"` | First topic level; must match the client's `topic_prefix`. |
+| `server_id` | random UUID | Appears in the MQTT client id; helps broker-side tracing. |
+| `qos` | `1` | MQTT QoS for both directions. **Don't set 0** — at-most-once delivery corrupts the serial stream. |
+| `mqtt_options` | — | Forwarded to `mqtt.connect`: auth, TLS, keepalive, will, etc. |
+| `logger` | default | Inject your `Logger`. |
+
+The walkthrough's [mqtt-smoke.js](../note/walkthrough/mqtt-smoke.js) bundles `aedes` as an
+in-process broker so you can try this without installing mosquitto.
+
+**Trade-offs vs. direct transports:**
+
+- Slowest of the built-ins (broker hop per direction): ~4 MB/s, ~11 ms p99 RTT locally
+- Decoupled deployment — server and clients don't need to know each other's network address
+- Free pub-sub semantics (multiple clients can naturally subscribe to one device)
+- Broker can persist messages / retry on flaky links (depends on broker config + QoS)
+
+#### gRPC (`GrpcServer`)
+
+Wraps `@grpc/grpc-js`. Wire protocol is a single bi-directional streaming RPC defined in
+[`proto/remote-serialport.proto`](proto/remote-serialport.proto). Each `Channel(stream Envelope)`
+call is one `AbsTransport` (one namespace). The namespace label rides in stream metadata under
+`rsp-label`; the auth credential under `rsp-auth` (JSON-encoded).
+
+Use when you're already running in a gRPC ecosystem (envoy / linkerd / service mesh,
+observability via OpenTelemetry, mTLS via `grpc.ServerCredentials.createSsl`) and want this
+library to fit in naturally.
+
+```javascript
+const { RemoteSerialportServer, GrpcServer } = require("node-serialport-server");
+const grpc = require("@grpc/grpc-js");
+
+// Insecure (dev / trusted internal networks)
+new RemoteSerialportServer(undefined, 0, {
+    transport_server: new GrpcServer({ address: "0.0.0.0:17996" }),
+    auto_pipe: true
+});
+
+// TLS (server auth)
+const tls_creds = grpc.ServerCredentials.createSsl(
+    null,  // no client CA = no mTLS
+    [{ private_key: fs.readFileSync("server.key"), cert_chain: fs.readFileSync("server.crt") }],
+    false  // checkClientCertificate
+);
+new GrpcServer({ address: "0.0.0.0:17997" }, { credentials: tls_creds });
+```
+
+`GrpcServerOptions`:
+
+| Option | Default | What it does |
+|---|---|---|
+| `credentials` | `grpc.ServerCredentials.createInsecure()` | Standard gRPC credentials. Pass `createSsl(...)` for TLS / mTLS. |
+| `logger` | default | Inject your `Logger`. |
+
+The `.proto` file is shipped in this package under `proto/`; the server loads it via
+`@grpc/proto-loader` at first listen. Don't rename or delete that file at install time.
+
+**Trade-offs:**
+
+- Slower than direct transports (protobuf wrap + HTTP/2 stream management): ~7 MB/s throughput
+- p99 RTT ~15 ms — middle of the pack but worse than raw HTTP/2 because of the per-message wrap
+- Native gRPC tooling works: grpcurl, envoy, gRPC reflection, etc.
+
+#### WebRTC DataChannel (`WebRtcServer`) — experimental
+
+True peer-to-peer transport using `node-datachannel` (WebRTC over SCTP-over-DTLS-over-ICE).
+**Marked experimental** because `node-datachannel` is still maturing and WebRTC introduces a
+hard dependency on an out-of-band signaling channel for SDP + ICE exchange.
+
+```javascript
+const { RemoteSerialportServer, WebRtcServer } = require("node-serialport-server");
+
+// You provide a SignalingChannel — anything that can pass SDP offers/answers + ICE
+// candidates between server and client. The walkthrough uses an in-process EventEmitter;
+// production deployments typically use a small WebSocket signaling server.
+const signaling = {
+    on_message(handler) { /* hook handler to your channel of choice */ },
+    send(msg) { /* push msg to the matching peer */ }
+};
+
+new RemoteSerialportServer(undefined, 0, {
+    transport_server: new WebRtcServer({
+        signaling,
+        ice_servers: ["stun:stun.l.google.com:19302"]   // strings only — not W3C objects
+    }),
+    auto_pipe: true
+});
+```
+
+`WebRtcServerOptions`:
+
+| Option | Default | What it does |
+|---|---|---|
+| `signaling` | (required) | A `WebRtcSignalingChannel` that exchanges `{kind: "offer" \| "answer" \| "candidate", peer_id, sdp?, candidate?, mid?}` messages with each remote peer. |
+| `ice_servers` | `["stun:stun.l.google.com:19302"]` | Array of strings — `node-datachannel` does NOT accept the W3C `{urls, username, credential}` object form. For TURN: `"turn:user:pass@host:3478"`. |
+| `logger` | default | Inject your `Logger`. |
+
+Each `DataChannel(label)` opened by a client maps to one transport on the server side. The
+namespace label is the DataChannel label (`dc.getLabel()`).
+
+**Trade-offs:**
+
+- True P2P — once the connection is up, traffic doesn't pass through any server. Great for
+  fan-in / fan-out where you want to skip a relay.
+- Setup cost: 1-3 seconds for ICE gathering + DTLS handshake in real-world (loopback is much
+  faster).
+- Bring-your-own signaling server. The library ships a `WebRtcSignalingChannel` interface and
+  the walkthrough demo uses in-process EventEmitter. For browsers, the typical setup is a
+  WebSocket signaling server with a cross-origin policy.
+- `node-datachannel` is a native dependency (libdatachannel + libsrtp + libjuice) — heavier
+  install footprint than the JS-only transports.
+- WebRTC has no built-in app-layer auth — if you need to gate connections, put your auth in
+  the signaling layer (the user controls the signaling channel), or send a `hello` envelope as
+  the first message and reject in `auth_validator`.
+
 ## Protocol (v2)
 
 `serialport_handshake` (S→C) announces the protocol version on connect; the client checks
@@ -721,6 +996,243 @@ IPC transport 跟 socket.io 的差異：
 | Connection model | 多 client → server | 1-to-1 process pair |
 
 何時用 IPC：兩端都在同一個 Node process tree（worker threads、Electron utility process）。要跨 host / 跨網路就用 socket.io。
+
+#### Raw TCP / Unix Domain Socket / Named Pipe（`RawTcpServer`）
+
+長度前綴 framing + JSON envelope，跑在 `net.Socket` 上。適合：依賴最小化、封閉 LAN 不需要 socket.io 的 HTTP polling fallback、或想透過 OS 級的 pipe（UDS / Named Pipe）而不是 TCP。
+
+```javascript
+const { RemoteSerialportServer, RawTcpServer } = require("node-serialport-server");
+
+// Plain TCP，mux 模式（預設）
+new RemoteSerialportServer(undefined, 0, {
+    transport_server: new RawTcpServer({ port: 17993 }),
+    auto_pipe: true
+});
+
+// TLS over TCP
+new RawTcpServer({ port: 17994 }, { tls: { key, cert } });
+
+// 1-to-1（一條連線一個 namespace，IPC-like）
+new RawTcpServer({ port: 17995 }, { mode: "single-namespace" });
+
+// UDS（Linux/Mac）/ Named Pipe（Windows）— `path` 取代 `port`
+new RawTcpServer({ path: "/tmp/rsp.sock" });
+new RawTcpServer({ path: "\\\\.\\pipe\\rsp" });
+```
+
+`RawTcpServerOptions`：
+
+| 選項 | 預設 | 說明 |
+|---|---|---|
+| `mode` | `"mux"` | `"mux"`：一條 TCP 連線多工承載多個 namespace（envelope `ns` 欄位區分，socket.io-like）。`"single-namespace"`：一條 TCP 連線 = 一個 namespace，hello 時鎖死（IPC-like）。 |
+| `tls` | — | `tls.TlsOptions`。要開 TLS 就傳；plain TCP 就不傳。`path:` target（UDS / Named Pipe）會被忽略 — UDS/Pipe 沒 TLS 概念，安全邊界是檔案 permission。 |
+| `keep_alive` | `true` (30 秒) | TCP keepalive。`false` 關掉；`{ initial_delay_ms }` 自訂初始延遲。 |
+| `permissions` | — | UDS path `listen()` 後 chmod（例如 `0o660`）。TCP / Pipe 無效。 |
+| `logger` | 預設 | 注入自訂 `Logger`。 |
+
+**Wire format**（每 frame）：`[4 bytes BE total len][4 bytes BE json len][JSON envelope][optional binary tail]`。Hot channel（`serialport_packet`、mux/txn data）的 Buffer 走 binary tail，直接傳原始 bytes 不 JSON-encode — 避開 4 KB → 20 KB 的膨脹，throughput 因此能上 ~12 MB/s（不然 ~1 MB/s）。
+
+**Throughput / latency（localhost、4 KB device-emit chunks）**：
+
+| | Throughput | RTT p50 / p99 |
+|---|---|---|
+| Raw WebSocket（mux、plain） | 44.16 MB/s | 0.46 / 2.33 ms |
+| socket.io | 18.18 MB/s | 0.66 / 1.67 ms |
+| HTTP/2（h2c） | 16.92 MB/s | 0.48 / **1.48 ms** |
+| WebRTC DataChannel（loopback、無 NAT） | 12.79 MB/s | 0.67 / 3.35 ms |
+| Raw TCP（mux、plain） | 11.72 MB/s | **0.40** / 3.71 ms |
+| gRPC（insecure） | 6.80 MB/s | 1.34 / 14.87 ms |
+| Node IPC（worker_threads） | 4.70 MB/s | n/a（單 process） |
+| MQTT（aedes broker localhost） | 4.24 MB/s | 2.62 / 11.99 ms |
+
+`ws` 的 binary framing 比 Engine.IO 更精簡；socket.io 在整體穩定度上較強（多層緩衝）；HTTP/2 在 **p99 最好**（每個 stream 各自 flow control → 沒 HOL blocking）；Raw TCP 在 p50 上贏在 stack 薄。WebRTC localhost 數字不反映真實部署 — production 要加上 NAT / ICE / TURN 成本。gRPC 每個 message 多一層 protobuf 包，throughput 中等、p99 受 framing 拖累。MQTT 每方向多一個 broker 跳，是最慢的 — 但換來 pub-sub 語意跟 broker 持久化的便利。
+
+#### Raw WebSocket（`RawWebSocketServer`）
+
+跟 Raw TCP 同一套 envelope + framing，但跑在 `ws` 函式庫的 WebSocket 協定上。適合：想用 TCP-only 不需要 HTTP polling fallback 的 socket.io 替代品、需要 browser client、要把 WebSocket 掛到既有 HTTP server 上共用 port。
+
+```javascript
+const { RemoteSerialportServer, RawWebSocketServer } = require("node-serialport-server");
+
+// Plain ws://，mux 模式（預設）
+new RemoteSerialportServer(undefined, 0, {
+    transport_server: new RawWebSocketServer({ port: 17996 }),
+    auto_pipe: true
+});
+
+// TLS（wss://）
+new RawWebSocketServer({ port: 17997 }, { tls: { key, cert } });
+
+// 1-to-1
+new RawWebSocketServer({ port: 17998 }, { mode: "single-namespace" });
+
+// 自訂 HTTP path（預設 "/"）
+new RawWebSocketServer({ port: 17999, path: "/rsp" });
+```
+
+`RawWebSocketServerOptions`：
+
+| 選項 | 預設 | 說明 |
+|---|---|---|
+| `mode` | `"mux"` | 跟 Raw TCP 同義：`"mux"` 一條 ws 共享多 namespace、`"single-namespace"` 一條 ws = 一個 namespace。 |
+| `tls` | — | `tls.TlsOptions`。傳了就會把底層 HTTP server 升級成 HTTPS、URL 變 `wss://`。 |
+| `logger` | 預設 | 注入自訂 `Logger`。 |
+
+對應 client 是 `RawWebSocketClient`（看 [client README](../remote-serialport-client/README.md#raw-websocket-rawwebsocketclient)）。
+
+#### HTTP/2（`Http2Server`）
+
+用 Node 內建 `node:http2`。每個 namespace = 一條 HTTP/2 session 內的 stream，HTTP/2 原生 stream 多工就是 mux model — 沒有 `mode` 選項。每條 stream 各自有 flow-control window，慢消費者卡在一個 namespace 不會 head-of-line block 其它 namespace（所有內建 transport 裡 p99 最好）。
+
+```javascript
+const { RemoteSerialportServer, Http2Server } = require("node-serialport-server");
+
+// h2 over TLS（建議；ALPN "h2"）
+new RemoteSerialportServer(undefined, 0, {
+    transport_server: new Http2Server({ port: 17996 }, { tls: { key, cert } }),
+    auto_pipe: true
+});
+
+// h2c cleartext（信任的內網才用 — 多數非 Node 客戶端不支援 h2c）
+new Http2Server({ port: 17997 });
+```
+
+`Http2ServerOptions`：
+
+| 選項 | 預設 | 說明 |
+|---|---|---|
+| `tls` | — | `http2.SecureServerOptions`。傳了就 h2 over TLS、`allowHTTP1: false`。沒傳就 h2c cleartext。 |
+| `logger` | 預設 | 注入自訂 `Logger`。 |
+
+每條 incoming stream 的 `:path` header 就是 namespace label。所以 `server.of("/dev/ttyUSB0").on("connection", ...)` 對應 client 用 `:path: /dev/ttyUSB0` 開的 stream。Client class（`Http2Client`）會自動把 `open(label)` 的 `label` 設成 `:path`。
+
+#### MQTT broker pattern（`MqttServer`）
+
+連到外部 MQTT broker（mosquitto / EMQX / HiveMQ / aedes / NATS-MQTT 等），broker 變成 wire。Topic 慣例（預設 prefix `"rsp"`）：
+
+```text
+<prefix>/c2s/<client_id>/<label>     client → server（含 `hello` envelope）
+<prefix>/s2c/<client_id>/<label>     server → client
+```
+
+Server 訂閱 `<prefix>/c2s/+/#`（多階 wildcard 接得到含 `/` 的 label），用 `(client_id, label)` demux，路由到 `server.of(label)` 註冊的 endpoint。
+
+```javascript
+const { RemoteSerialportServer, MqttServer } = require("node-serialport-server");
+
+new RemoteSerialportServer(undefined, 0, {
+    transport_server: new MqttServer({
+        broker_url: "mqtt://broker.internal:1883",
+        topic_prefix: "rsp",            // 預設 "rsp"
+        qos: 1,                          // QoS 0 會掉 byte，serial stream 千萬別設
+        mqtt_options: { username: "u", password: "p" }
+    }),
+    auto_pipe: true
+});
+```
+
+`MqttServerOptions`：
+
+| 選項 | 預設 | 說明 |
+|---|---|---|
+| `broker_url` | （必填） | 例如 `mqtt://host:1883` 或 `mqtts://host:8883`。 |
+| `topic_prefix` | `"rsp"` | 第一階 topic level；必須跟 client 一致。 |
+| `server_id` | 隨機 UUID | 進 MQTT clientId，方便 broker 端 trace。 |
+| `qos` | `1` | 雙向 QoS。**不要設 0** — at-most-once 會丟 byte。 |
+| `mqtt_options` | — | 直接給 `mqtt.connect`：auth / TLS / keepalive / will / 等。 |
+| `logger` | 預設 | 注入自訂 `Logger`。 |
+
+走 walkthrough 試請看 [mqtt-smoke.js](../note/walkthrough/mqtt-smoke.js)，內建 `aedes` in-process broker，不用裝 mosquitto。
+
+**跟直連 transport 的 trade-off：**
+
+- 是內建 transport 裡最慢的（每方向多一個 broker hop）：localhost 約 4 MB/s、p99 RTT 約 11 ms
+- 部署解耦 — server 跟 client 不用知道對方的網路位址
+- 天然 pub-sub 語意（多個 client 可以自然訂閱同一個 device）
+- broker 可持久化訊息 / flaky link retry（看 broker 設定 + QoS）
+
+#### gRPC（`GrpcServer`）
+
+包 `@grpc/grpc-js`。Wire protocol 是一條 bi-directional streaming RPC，定義在 [`proto/remote-serialport.proto`](proto/remote-serialport.proto)。每個 `Channel(stream Envelope)` 呼叫 = 一條 `AbsTransport`（一個 namespace）。Namespace label 走 stream metadata 的 `rsp-label`、auth credential 走 `rsp-auth`（JSON-encoded）。
+
+什麼時候用：已經在 gRPC 生態圈裡（envoy / linkerd / service mesh、OpenTelemetry observability、`grpc.ServerCredentials.createSsl` 的 mTLS），想讓這個 library 直接融入。
+
+```javascript
+const { RemoteSerialportServer, GrpcServer } = require("node-serialport-server");
+const grpc = require("@grpc/grpc-js");
+
+// Insecure（dev / 信任內網）
+new RemoteSerialportServer(undefined, 0, {
+    transport_server: new GrpcServer({ address: "0.0.0.0:17996" }),
+    auto_pipe: true
+});
+
+// TLS（server auth）
+const tls_creds = grpc.ServerCredentials.createSsl(
+    null,
+    [{ private_key: fs.readFileSync("server.key"), cert_chain: fs.readFileSync("server.crt") }],
+    false
+);
+new GrpcServer({ address: "0.0.0.0:17997" }, { credentials: tls_creds });
+```
+
+`GrpcServerOptions`：
+
+| 選項 | 預設 | 說明 |
+|---|---|---|
+| `credentials` | `grpc.ServerCredentials.createInsecure()` | 標準 gRPC credentials；要 TLS / mTLS 就傳 `createSsl(...)`。 |
+| `logger` | 預設 | 注入自訂 `Logger`。 |
+
+`.proto` 檔在 package 的 `proto/` 下，server 第一次 listen 時透過 `@grpc/proto-loader` 載入。安裝後不要改名或刪除這個檔案。
+
+**Trade-offs：**
+
+- 比直連 transport 慢（多 protobuf wrap + HTTP/2 stream 管理）：throughput ~7 MB/s
+- p99 RTT ~15 ms — 中段班、比 raw HTTP/2 差（每 message wrap 的成本）
+- 換來原生 gRPC 工具鏈：grpcurl、envoy、gRPC reflection 等
+
+#### WebRTC DataChannel（`WebRtcServer`）— experimental
+
+真 P2P transport，用 `node-datachannel`（WebRTC over SCTP-over-DTLS-over-ICE）。**標 experimental**，因為 `node-datachannel` 還在成熟、且 WebRTC 強制依賴 out-of-band signaling 來交換 SDP + ICE 候選。
+
+```javascript
+const { RemoteSerialportServer, WebRtcServer } = require("node-serialport-server");
+
+// signaling channel 自己準備 — 任何能把 SDP offer/answer + ICE candidate 在 server / client
+// 間傳遞的東西都行。walkthrough 用 in-process EventEmitter；production 通常會起一個小的
+// WebSocket signaling server。
+const signaling = {
+    on_message(handler) { /* hook 到你選的 channel */ },
+    send(msg) { /* push msg 到對應的 peer */ }
+};
+
+new RemoteSerialportServer(undefined, 0, {
+    transport_server: new WebRtcServer({
+        signaling,
+        ice_servers: ["stun:stun.l.google.com:19302"]   // 純字串 — 不是 W3C 的 object 格式
+    }),
+    auto_pipe: true
+});
+```
+
+`WebRtcServerOptions`：
+
+| 選項 | 預設 | 說明 |
+|---|---|---|
+| `signaling` | （必填） | 一個 `WebRtcSignalingChannel`，負責交換 `{kind: "offer" \| "answer" \| "candidate", peer_id, sdp?, candidate?, mid?}` 訊息。 |
+| `ice_servers` | `["stun:stun.l.google.com:19302"]` | 字串陣列 — `node-datachannel` **不接受** W3C 的 `{urls, username, credential}` object 格式。TURN：`"turn:user:pass@host:3478"`。 |
+| `logger` | 預設 | 注入自訂 `Logger`。 |
+
+Client 開的每個 `DataChannel(label)` 對應一條 server 端 transport。namespace label 就是 DataChannel label（`dc.getLabel()`）。
+
+**Trade-offs：**
+
+- 真 P2P — 連線起來後流量不經過任何 server。適合「server 只當引介，之後客戶端直接 P2P」這種 fan-in / fan-out。
+- 建立成本：真實網路 1-3 秒 ICE gathering + DTLS handshake（loopback 快很多）。
+- Signaling server 要自己準備。library 給的是 `WebRtcSignalingChannel` 介面、walkthrough demo 用 in-process EventEmitter；browser 場景通常用 WebSocket signaling server。
+- `node-datachannel` 是 native binding（libdatachannel + libsrtp + libjuice），安裝成本比純 JS transport 重。
+- WebRTC 沒有 app-layer auth — 要做認證請放在 signaling 那層（user 控制 signaling channel），或在 `hello` envelope 階段交由 `auth_validator` 拒絕。
 
 ### 協定（v2）
 

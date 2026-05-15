@@ -356,4 +356,10 @@ export class RemoteSerialportServer extends AbsRemoteSerialServer<
 /* ---- transport re-exports ---- */
 export { SocketIoServer, SocketIoServerEndpoint, SocketIoServerTransport } from "./modules/socketio-transport";
 export { NodeIpcServer, NodeIpcServerEndpoint, NodeIpcServerTransport, MessagePortLike } from "./modules/ipc-transport";
+export { RawTcpServer, RawTcpListenTarget, RawTcpServerOptions } from "./modules/raw-tcp-transport";
+export { RawWebSocketServer, RawWebSocketListenTarget, RawWebSocketServerOptions } from "./modules/raw-websocket-transport";
+export { Http2Server, Http2ListenTarget, Http2ServerOptions } from "./modules/http2-transport";
+export { MqttServer, MqttServerOptions } from "./modules/mqtt-transport";
+export { GrpcServer, GrpcListenTarget, GrpcServerOptions } from "./modules/grpc-transport";
+export { WebRtcServer, WebRtcServerOptions, WebRtcSignalingChannel, WebRtcSignalingMessage } from "./modules/webrtc-transport";
 export type { AbsTransport, AbsTransportEndpoint, AbsTransportServer } from "./types/remote-serialport-types/src/transport";
