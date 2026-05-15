@@ -1,20 +1,20 @@
 {
     "name": "node-serialport-server",
-    "version": "0.0.8",
-    "description": "Remote serialport server, Current In Developing",
+    "version": "0.1.0",
+    "description": "Remote serialport server",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
     "files": [
         "dist"
     ],
     "scripts": {
-        "test": "tsc --project ./tsconfig-test.json && cd ./dist-test/test && node ./test.js",
+        "test": "npm run ci-test",
         "start": "npm run test",
         "build-test": "tsc --project ./tsconfig-test.json",
         "build-prod": "tsc --project ./tsconfig.json",
         "build": "npm run build-prod",
         "build-and-publish": "tsc --build && npm publish",
-        "ci-test": "jest"
+        "ci-test": "jest --forceExit"
     },
     "repository": {
         "type": "git",
