@@ -62,13 +62,20 @@ class Http2ServerStreamTransport extends AbsTransport {
     private _hello_received = false;
     private readonly _hello_queue: Envelope[] = [];
 
-    constructor(stream: ServerHttp2Stream, label: string, credential_default: unknown, logger: Logger) {
+    /** One-shot callback fired the moment the first `hello` envelope arrives, so the server can
+     *  defer `endpoint.accept(this)` until `credential` is populated. Without this, the wrapping
+     *  `RemoteSerialServerSocket` runs its `_authenticate(...)` before the client hello has
+     *  arrived and `auth_validator` is called with `credential === undefined`. */
+    private _on_hello_ready: (() => void) | null;
+
+    constructor(stream: ServerHttp2Stream, label: string, credential_default: unknown, logger: Logger, on_hello_ready: (() => void) | null = null) {
         super();
         this._id = randomUUID();
         this._label = label;
         this._stream = stream;
         this._credential = credential_default;
         this._logger = logger;
+        this._on_hello_ready = on_hello_ready;
         this._decoder = new FrameDecoder(
             (env) => this._on_envelope(env),
             (err) => {
@@ -79,7 +86,12 @@ class Http2ServerStreamTransport extends AbsTransport {
         stream.on("data", (chunk: Buffer) => this._decoder.push(chunk));
         stream.on("close", () => this._on_remote_close());
         stream.on("error", (err) => this._logger.debug(`http2 stream ${this._label} error: ${err.message}`));
-        process.nextTick(() => this._fire_lifecycle("connect"));
+        // F8: do NOT fire `connect` lifecycle here. Other transports (raw-tcp, raw-ws, mqtt,
+        // grpc) only fire `connect` after the credential is known — either because the transport
+        // isn't constructed until hello arrives (raw-tcp/raw-ws) or the credential is in the
+        // protocol-level header (grpc metadata). HTTP/2 constructs the transport on stream open
+        // but credential only arrives in the subsequent `hello` envelope, so firing `connect`
+        // here would expose pre-hello state. The hello handler fires it instead.
     }
 
     get id(): string { return this._id; }
@@ -93,8 +105,27 @@ class Http2ServerStreamTransport extends AbsTransport {
     private _on_envelope(env: Envelope): void {
         if (env === null || typeof env !== "object" || typeof (env as any).k !== "string") return;
         if (env.k === "hello") {
+            // D9: guard against a duplicate `hello` on the same stream. The first hello
+            // populates credential + fires the deferred endpoint.accept; any subsequent hello
+            // would otherwise silently overwrite `_credential_runtime` (minor security gap —
+            // a misbehaving or hostile client could "upgrade" its credential mid-session).
+            if (this._hello_received === true) {
+                this._logger.warn(`http2 stream ${this._label}: duplicate hello envelope; ignoring`);
+                return;
+            }
             this._credential_runtime = env.auth;
             this._hello_received = true;
+            // Fire one-shot accept callback so the namespace endpoint sees this transport only
+            // after credential is populated — fixes the race where auth_validator ran with
+            // credential=undefined.
+            const accept_cb = this._on_hello_ready;
+            this._on_hello_ready = null;
+            if (accept_cb !== null) { try { accept_cb(); } catch { /* swallow */ } }
+            // F8 + F13: fire `connect` lifecycle now (post-credential), via setImmediate so
+            // direct subscribers attached through Promise.then / await also catch it (nextTick
+            // would fire before microtasks). Note this also keeps the post-hello ordering from
+            // F8 — `connect` still fires AFTER credential is populated.
+            setImmediate((): void => this._fire_lifecycle("connect"));
             for (const queued of this._hello_queue) this._dispatch_msg(queued as Envelope & { k: "msg" });
             this._hello_queue.length = 0;
             return;
@@ -276,10 +307,19 @@ export class Http2Server extends AbsTransportServer {
         }
         // Accept the stream as a long-lived bi-di carrier — content-type is opaque bytes.
         stream.respond({ ":status": 200, "content-type": "application/octet-stream" }, { waitForTrailers: false });
-        const transport = new Http2ServerStreamTransport(stream, label, undefined, this._logger);
+        // Defer endpoint.accept(...) until the client's first `hello` envelope arrives — at that
+        // point the transport's credential getter returns the auth payload, and the wrapping
+        // RemoteSerialServerSocket's _authenticate() sees the real credential instead of
+        // undefined. (Raw TCP / Raw WS use the equivalent pattern: their transport isn't even
+        // constructed until hello has been parsed.)
+        let accept_fired = false;
+        const transport: Http2ServerStreamTransport = new Http2ServerStreamTransport(stream, label, undefined, this._logger, (): void => {
+            if (accept_fired === true) return;
+            accept_fired = true;
+            endpoint.accept(transport);
+        });
         this._streams.add(transport);
         transport.on_lifecycle("disconnect", () => this._streams.delete(transport));
-        endpoint.accept(transport);
     }
 
     private _find_endpoint(label: string): Http2Endpoint | null {

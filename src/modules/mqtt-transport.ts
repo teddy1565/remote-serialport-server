@@ -66,7 +66,8 @@ class MqttServerTransport extends AbsTransport {
         this._client_id = client_id;
         this._credential = credential;
         this._publish = publish;
-        process.nextTick(() => this._fire_lifecycle("connect"));
+        // F13: setImmediate (not process.nextTick) for sync + Promise.then + await symmetry.
+        setImmediate(() => this._fire_lifecycle("connect"));
     }
 
     get id(): string { return this._id; }
@@ -297,10 +298,24 @@ export class MqttServer extends AbsTransportServer {
     }
 
     close(): void {
-        for (const t of this._transports.values()) { try { t._on_remote_close(); } catch {} }
+        // D6: mirror D3's client-side fix — call each transport's `close()` so it publishes
+        // its `bye` envelope on the s2c topic before we end the broker connection. Without
+        // this, MQTT clients only learn the server is gone after the broker's keepalive
+        // expires (~60 s) instead of immediately.
+        for (const t of this._transports.values()) { try { t.close(); } catch {} }
         this._transports.clear();
         this._endpoints.clear();
-        if (this._client !== null) { try { this._client.end(true); } catch {} this._client = null; }
+        if (this._client !== null) {
+            const client = this._client;
+            this._client = null;
+            // Graceful end (force=false) so the queued bye publishes drain; fall back to
+            // force-end after 1 s in case the broker is unresponsive.
+            let done = false;
+            const finalize = (): void => { if (done) return; done = true; try { client.end(true); } catch {} };
+            try { client.end(false, {}, finalize); } catch { finalize(); }
+            const t = setTimeout(finalize, 1000);
+            if (typeof (t as { unref?: () => void }).unref === "function") (t as { unref: () => void }).unref();
+        }
         this._listening = false;
     }
 }

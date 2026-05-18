@@ -84,7 +84,8 @@ class GrpcServerCallTransport extends AbsTransport {
         call.on("end", () => this._on_remote_close());
         call.on("close", () => this._on_remote_close());
         call.on("error", (err) => this._logger.debug(`grpc stream ${this._label} err: ${err.message}`));
-        process.nextTick(() => this._fire_lifecycle("connect"));
+        // F13: setImmediate (not process.nextTick) for sync + Promise.then + await symmetry.
+        setImmediate(() => this._fire_lifecycle("connect"));
     }
 
     get id(): string { return this._id; }

@@ -6,6 +6,14 @@
 
 ## English
 
+> **⚠ Node.js only.** This library uses Node's `Buffer`, `worker_threads`, `node:http2`, the
+> native `serialport` binding, and other Node-specific APIs. It **does not work in browsers**
+> — bundling it via webpack / Vite / Rollup will fail at `Buffer`/`stream`/`net` imports.
+> Even though socket.io and `ws` themselves have browser builds, this library is the *Node
+> side* of a Node↔Node deployment. For a browser front-end, write a thin app-layer adapter
+> against your own WebSocket / WebRTC and forward bytes — don't try to load this package in
+> the browser.
+
 Proxy a host's physical serial ports over the network: the **server** holds the real serial ports;
 the **client** connects and gets a local *virtual* serial port (a mock-binding–backed
 `SerialPortStream`) that mirrors a remote one. Reads/writes on the virtual port are forwarded to the
@@ -384,9 +392,28 @@ unmodified existing serialport code reacts to deny states the same way it does t
 
 #### Encryption / TLS
 
-This library doesn't wrap transports in TLS. For socket.io, configure HTTPS at the http server
-layer (pass it into `Server` via `socket_server_options`). For IPC, use OS-level sandbox / process
-isolation. mTLS is delegated to `https.createServer({requestCert: true, ...})`.
+This library doesn't wrap transports in TLS itself. For each transport:
+
+- **socket.io**: build your own `https.Server` and attach the library's socket.io instance to it
+  via the public `srv.io` accessor — do NOT call `srv.listen()` afterwards (it would create a
+  second plain-HTTP listener):
+
+  ```javascript
+  const httpsServer = require("https").createServer({ key, cert });
+  const srv = new RemoteSerialportServer({ cors: { origin: "*" } }, 17991, { /* ... */ });
+  srv.io.attach(httpsServer);                       // attach socket.io to https
+  srv.of("/dev/ttyUSB0").on("connection", () => {});  // friction#9 — still required
+  httpsServer.listen(17991);                        // listen on https
+  // (skip srv.listen() in this mode)
+  ```
+- **Raw TCP / Raw WebSocket / HTTP/2**: built-in `{ tls: ... }` option on the transport ctor.
+- **gRPC**: built-in `credentials` option; pass `grpc.ServerCredentials.createSsl(...)`.
+- **MQTT**: connect to an `mqtts://` broker URL; pass any TLS options the `mqtt` lib accepts via
+  `mqtt_options`.
+- **WebRTC**: SCTP-over-DTLS-over-ICE is always encrypted by spec — no app-layer cert plumbing.
+- **IPC**: OS-level sandbox / process isolation.
+
+mTLS for socket.io: pass `{requestCert: true, ca, ...}` to `https.createServer(...)`.
 
 ### Wire backpressure (device→client)
 
@@ -574,6 +601,8 @@ new Http2Server({ port: 17997 });
 
 The `:path` header on each incoming stream is treated as the namespace label. So `server.of("/dev/ttyUSB0").on("connection", ...)` matches client streams opened with `:path: /dev/ttyUSB0`. The client class (`Http2Client`) sets `:path` automatically from the `label` you pass to `open(label)`.
 
+**Auth + the deferred-accept hello-gate**: the HTTP/2 server defers firing `endpoint.accept(transport)` until the client's first `hello` envelope arrives on the stream. That ensures `transport.credential` is populated with the client's `auth` payload before the wrapping `RemoteSerialServerSocket`'s `auth_validator(credential, meta)` runs — without this gate the validator would be called with `credential === undefined` because hello arrives microseconds after the stream is opened. Pass the credential into the client transport's own ctor (`new Http2Client({...}, { auth: ... })`), not the top-level `RemoteSerialportClient` options. (Duplicate `hello` envelopes on the same stream after the first are dropped with a `warn` log — a misbehaving client cannot upgrade its credential mid-session.)
+
 #### MQTT broker pattern (`MqttServer`)
 
 Connects to an external MQTT broker (mosquitto / EMQX / HiveMQ / aedes / NATS-MQTT / etc.) and
@@ -622,6 +651,25 @@ in-process broker so you can try this without installing mosquitto.
 - Decoupled deployment — server and clients don't need to know each other's network address
 - Free pub-sub semantics (multiple clients can naturally subscribe to one device)
 - Broker can persist messages / retry on flaky links (depends on broker config + QoS)
+
+> **⚠ QoS 1 retransmits and write-critical workloads.** MQTT QoS 1 is "at-least-once":
+> under packet loss, the broker may redeliver the same PUBLISH and the receiver acks each
+> copy. **This library does NOT deduplicate retransmitted messages at the application
+> layer** — if the network drops a PUBACK and the broker resends, a `serialport_send_packet`
+> envelope can reach the device's port **twice**, writing the same Modbus PDU / RS-485
+> command twice. For write-idempotent workloads (status polling, log streaming) this is
+> usually fine. For write-critical workloads (commanding actuators, Modbus function-code
+> 5/6/15/16) one of the following is required:
+>
+> - Set `qos: 2` (exactly-once; broker uses 4-step handshake — higher latency, no
+>   duplicates).
+> - Use a different transport (Raw TCP / Raw WS / HTTP/2) where the underlying TCP stream
+>   gives in-order non-duplicated delivery.
+> - Dedup at the app layer by stamping each command with a sequence number.
+>
+> Also, **MQTT KeepAlive defaults to ~60 s** in the `mqtt` lib: a dead server is not
+> detected on the client side until KeepAlive expires. Tune via `mqtt_options.keepalive`
+> if you need faster failure detection.
 
 #### gRPC (`GrpcServer`)
 
@@ -720,6 +768,50 @@ namespace label is the DataChannel label (`dc.getLabel()`).
 - WebRTC has no built-in app-layer auth — if you need to gate connections, put your auth in
   the signaling layer (the user controls the signaling channel), or send a `hello` envelope as
   the first message and reject in `auth_validator`.
+- **Shared mode** (`multi_access: "shared"`) works on WebRTC just like every other transport:
+  multiple peers, each with their own `WebRtcClient` + own signaling channel pair, can attach
+  to one `WebRtcServer` against the same physical port. The server demuxes by `peer_id` from
+  signaling messages; per-path `SharedSessionRegistry` refcounts them. Your signaling adapter
+  must support multiple peer_ids — the walkthrough's [`round10-webrtc-shared.js`](../note/walkthrough/round10-webrtc-shared.js) shows the pattern (one `make_client_channel(peer_id)` per client).
+
+**Real-world deployment notes (TURN / NAT traversal)**
+
+The walkthrough numbers (12.79 MB/s, 0.67 ms p50) are **loopback** — they do NOT reflect
+production. Plan for these realities:
+
+- **STUN alone is not enough on most corporate / mobile networks.** Symmetric NAT (common
+  on enterprise firewalls, 4G/5G carriers, hotel Wi-Fi) cannot be traversed with STUN. Such
+  peers will fail to connect unless you provide a **TURN relay**.
+- **TURN reverts WebRTC to a relayed path** — all traffic flows through the TURN server.
+  You lose the "true P2P" benefit and pay the TURN server's bandwidth. Throughput and
+  latency look more like a TCP relay than direct UDP.
+- **ICE gathering takes time.** Loopback: ~ms. Same-LAN: ~100-300 ms. Across the public
+  internet with TURN candidates: 1-3 s typical, 5-10 s on slow networks.
+- **DTLS handshake** adds another round-trip on top of ICE.
+- **Provide both STUN and TURN in `ice_servers`.** Example:
+
+  ```javascript
+  ice_servers: [
+      "stun:stun.l.google.com:19302",
+      "turn:turn-user:turn-pass@turn.example.com:3478",
+      "turns:turn-user:turn-pass@turn.example.com:5349",  // TURN over TLS
+  ]
+  ```
+
+  Run your own [coturn](https://github.com/coturn/coturn) or use a hosted service (Twilio
+  NAT Traversal, Cloudflare TURN, Xirsys). Free public STUN servers are fine; do NOT use
+  free public TURN — they're rate-limited or not available.
+- **The library does NOT diagnose NAT failures for you.** If a peer cannot establish ICE,
+  the `WebRtcClient` simply never reaches `state === "open"`. Set a connection timeout in
+  your app code and surface "WebRTC connection failed (check NAT/TURN config)" to the user.
+- **Signaling is your responsibility** — the library's `WebRtcSignalingChannel` is just the
+  protocol shape (offer/answer/candidate). Real deployments use a small WebSocket signaling
+  service that routes messages between peers; the walkthrough uses an in-process
+  `EventEmitter` only because there's no real network in the test.
+
+For browsers as the peer, see the Node-only banner at the top of this README — the
+*signaling* side can be a browser (browsers can speak WebRTC natively), but the *Node side*
+of the connection still runs this library.
 
 ## Protocol (v2)
 
@@ -793,9 +885,36 @@ crosses 1 MB; resumes once below 256 KB. Only in `multi_access: 'reject'` mode (
   (`server.mux()` + `client.mux()`). Multi-endpoint IPC demux (envelope-level `ns` routing) is
   not implemented in P4.
 
+## Production monitoring
+
+This library's leak / cleanup paths are covered by R4 cleanup-probe (20 scenarios × 4
+byte-stream transports) and R7 soak (400 cycles × 4 byte-stream transports — heap grew
+&lt;1 MB, internal Maps peaked at 1 and returned to 0). What was NOT exercised in CI: a
+**continuous multi-hour soak** with sustained traffic. Recommended monitoring for any
+24/7 server deployment:
+
+- **RSS / heap growth** — `process.memoryUsage().rss` and `.heapUsed` sampled periodically.
+  Any monotonic growth over hours is a flag; restart policy + ops dashboard.
+- **File descriptor count** (`lsof -p $PID | wc -l` on Linux, or `Get-Process` handles on
+  Windows). The library cleans connections (D7 / D8 / M7) but the underlying socket
+  library may not release FDs immediately under high churn.
+- **Per-process listener accumulation** — turn on
+  `process.env.NODE_NO_WARNINGS=` empty and watch for `MaxListenersExceededWarning` in
+  stderr.
+- **`unhandled rejection`** + **`uncaught exception`** — install `process.on(...)` handlers
+  and log; the library wraps listener invocations in try/catch but external app code may not.
+- For MQTT-based deployments, **broker-side metrics** matter more than process-side: queue
+  depth, in-flight count, KeepAlive failures.
+
+Recommended pre-release: run your application against this library for at least 24 hours
+of representative traffic before declaring a deployment stable. None of the existing
+CI-friendly tests are long-duration; that's a release-engineering job.
+
 <a id="中文"></a>
 
 ## 中文
+
+> **⚠ Node.js 限定。** 這個 library 用了 Node 的 `Buffer`、`worker_threads`、`node:http2`、native `serialport` binding 等 Node 專屬 API。**瀏覽器跑不起來** — 用 webpack / Vite / Rollup 打包會在 `Buffer`/`stream`/`net` import 直接炸。雖然 socket.io 跟 `ws` 自己有 browser build，但這個 library 是 Node↔Node 部署裡的 *Node 端*。要做瀏覽器前端，請自己寫一層薄薄的 app-layer adapter（搭配你自己的 WebSocket / WebRTC）把 bytes 轉過去 — 不要試圖直接 bundle 這個 package 進 browser。
 
 把主機的實體序列埠透過網路代理出去：**server** 守住真實的序列埠；**client** 連上來，拿到一個本地 *虛擬* 序列埠（用 mock-binding 撐起來的 `SerialPortStream`）對應某個遠端埠。對虛擬埠的讀寫會轉發到實體埠，反之亦然 — 既有的 Node serialport 生態（`serialport`、`modbus-serial` …）幾乎零修改就能跨網路使用。
 
@@ -941,6 +1060,39 @@ interface Logger {
 
 **`cow-write-isolate` 注意事項**：echo filter 是 byte-level prefix match。device 在 echo 前改 byte（加 `\r\n`、轉碼…）會打敗 filter — 那些 unmatched bytes 落回全 fanout，全部 subscriber 看得到。適合 line-echo 或 full-duplex 原樣 echo 的 device；不要用它做真正的 byte-level 隔離。
 
+**Shared 模式下 hook `socket.port` 的陷阱**：`connection` handler 拿到的 `socket.port` 是**共享**的物理埠 `EventEmitter`，不是 per-subscriber 的視圖。所以 `socket.port.on("data", …)` / `socket.port.on("write-command", …)` 會**每個 subscriber 各裝一個 listener，每筆事件依 listener 數量觸發**；listener closure 抓到的 `socket.identity` 是當下裝 listener 的那個 socket，不是寫的 client。
+
+```javascript
+// WRONG — N 個 subscriber 就裝 N 個 listener，且 id.user tag 錯誤對應
+server.of().on("connection", (socket) => {
+  const id = socket.identity;
+  socket.port.on("write-command", (chunk) => log(`${id.user} wrote ${chunk}`));
+});
+
+// Right — 只裝一次，把 chunk 當匿名處理
+let installed = false;
+server.of().on("connection", (socket) => {
+  if (installed) return; installed = true;
+  socket.port.on("write-command", (chunk) => log(`someone wrote ${chunk}`));
+});
+```
+
+要 per-write attribution 請走 `acl.can_write`（per-subscriber 帶 `identity`）並在那邊紀錄。Listener 加 `subscriber_id` 參數是未來 minor version 可能加的 API。
+
+**Shared 模式用 `SerialPortMock` 測試的注意事項**：最後一個 subscriber 離開時 `SharedPortSession` 會把底層物理埠關掉。如果測試 harness 透過 `serialport_factory` 抓住 mock 來推 synthetic device output，那個 captured 變數現在指向已關閉的 mock，`emitData(...)` 會丟 `Port must be open to pretend to receive data`。下一個 subscriber 來時 factory 會給一個**全新**的 mock — 所以不要只 capture 一次，每次 factory 被呼叫都要重 capture，並用 `mock.isOpen` 加 try/catch 守 `emitData`：
+
+```javascript
+let captured = null;
+new RemoteSerialportServer({}, 0, {
+  multi_access: "shared", shared_mode: "fifo",
+  serialport_factory: (opts) => { const m = new SerialPortMock(opts); captured = m; return m; }
+});
+setInterval(() => {
+  if (captured === null || captured.isOpen === false) return;
+  try { captured.port.emitData(buf); } catch { /* port flipped to closed between check + emit */ }
+}, 400);
+```
+
 ### 認證與 ACL（`auth_validator` + `acl`）
 
 ```javascript
@@ -974,7 +1126,25 @@ Client 透過本地虛擬 stream 的 `'error'` 事件就能拿到 ERROR state �
 
 #### 加密 / TLS
 
-Library 本身不加密 transport。socket.io：在 http server layer 用 HTTPS（透過 `socket_server_options` 把 https.Server 注入）。IPC：靠 OS-level sandbox / process isolation。mTLS：交給 `https.createServer({requestCert: true, ...})`。
+Library 本身不包 TLS。各 transport 的 TLS 設定：
+
+- **socket.io**：自己起 `https.Server`，再把 library 內部的 socket.io 用公開的 `srv.io` accessor 接上去 — 接完**不要**呼叫 `srv.listen()`（會多開一個明文 listener）：
+
+  ```javascript
+  const httpsServer = require("https").createServer({ key, cert });
+  const srv = new RemoteSerialportServer({ cors: { origin: "*" } }, 17991, { /* ... */ });
+  srv.io.attach(httpsServer);                       // socket.io 接到 https
+  srv.of("/dev/ttyUSB0").on("connection", () => {});  // friction#9 還是要 register
+  httpsServer.listen(17991);                        // https 自己 listen
+  // (這個模式下不要再 srv.listen())
+  ```
+- **Raw TCP / Raw WebSocket / HTTP/2**：transport ctor 內建 `{ tls: ... }` option。
+- **gRPC**：內建 `credentials` option，傳 `grpc.ServerCredentials.createSsl(...)`。
+- **MQTT**：用 `mqtts://` broker URL；`mqtt_options` 可以丟任何 `mqtt` lib 支援的 TLS 選項。
+- **WebRTC**：規範本身就是 SCTP-over-DTLS-over-ICE，沒有 app 層憑證設定。
+- **IPC**：靠 OS-level sandbox / process isolation。
+
+socket.io 的 mTLS：把 `{requestCert: true, ca, ...}` 傳給 `https.createServer(...)`。
 
 ### Wire backpressure（device→client）
 
@@ -1152,6 +1322,14 @@ new RemoteSerialportServer(undefined, 0, {
 - 天然 pub-sub 語意（多個 client 可以自然訂閱同一個 device）
 - broker 可持久化訊息 / flaky link retry（看 broker 設定 + QoS）
 
+> **⚠ QoS 1 重送跟「寫關鍵」工作負載**：MQTT QoS 1 是「至少送達一次」。掉包時 broker 會重送 PUBLISH，receiver 對每份都回 PUBACK。**這個 library 不會在 application layer 對重送訊息做去重** — 如果 PUBACK 路上掉了 broker 重送，一個 `serialport_send_packet` envelope 可能會抵達裝置埠**兩次**，把同一個 Modbus PDU / RS-485 command 寫兩次。對寫入冪等的工作（狀態輪詢、log streaming）沒差；對**寫關鍵**（操作 actuator、Modbus function-code 5/6/15/16）需要：
+>
+> - 設 `qos: 2`（剛好一次；broker 走 4-step handshake — latency 更高但不會重複）。
+> - 換不同 transport（Raw TCP / Raw WS / HTTP/2），底層 TCP stream 自帶 in-order 不重複交付。
+> - 在 app 層自己用 sequence number 戳每筆命令做去重。
+>
+> 另外，`mqtt` lib 的 **KeepAlive 預設 ~60 秒**：server 真的掛了 client 端要 ~60 秒後才偵測到。透過 `mqtt_options.keepalive` 調短可加快故障偵測。
+
 #### gRPC（`GrpcServer`）
 
 包 `@grpc/grpc-js`。Wire protocol 是一條 bi-directional streaming RPC，定義在 [`proto/remote-serialport.proto`](proto/remote-serialport.proto)。每個 `Channel(stream Envelope)` 呼叫 = 一條 `AbsTransport`（一個 namespace）。Namespace label 走 stream metadata 的 `rsp-label`、auth credential 走 `rsp-auth`（JSON-encoded）。
@@ -1233,6 +1411,31 @@ Client 開的每個 `DataChannel(label)` 對應一條 server 端 transport。nam
 - Signaling server 要自己準備。library 給的是 `WebRtcSignalingChannel` 介面、walkthrough demo 用 in-process EventEmitter；browser 場景通常用 WebSocket signaling server。
 - `node-datachannel` 是 native binding（libdatachannel + libsrtp + libjuice），安裝成本比純 JS transport 重。
 - WebRTC 沒有 app-layer auth — 要做認證請放在 signaling 那層（user 控制 signaling channel），或在 `hello` envelope 階段交由 `auth_validator` 拒絕。
+- **Shared mode**（`multi_access: "shared"`）在 WebRTC 上跟其它 transport 一樣：多個 peer 各自帶自己的 `WebRtcClient` + 自己的 signaling channel pair，連到同一個 `WebRtcServer` 對同一條 path。Server 端用 `peer_id` demux；per-path `SharedSessionRegistry` 做 refcount。你的 signaling adapter 要支援多 peer_id — 走 walkthrough 的 [`round10-webrtc-shared.js`](../note/walkthrough/round10-webrtc-shared.js) pattern（每個 client 一個 `make_client_channel(peer_id)`）。
+
+**真實網路部署注意事項（TURN / NAT traversal）**
+
+Walkthrough 那些數字（12.79 MB/s、0.67 ms p50）是**本機 loopback**，**不能**代表正式環境。準備上線前要意識到：
+
+- **只靠 STUN 在多數企業 / mobile 網路上不夠**。Symmetric NAT（常見於企業防火牆、4G/5G 電信、旅館 Wi-Fi）沒辦法用 STUN 穿越。這種 peer 沒有 **TURN relay** 就連不起來。
+- **TURN 會把 WebRTC 退化成中繼路徑** — 所有流量都會經過 TURN server，「真 P2P」優勢就沒了，還要付 TURN 的頻寬費用。throughput 跟 latency 數字會更接近 TCP relay 而不是直連 UDP。
+- **ICE gathering 要花時間**：loopback ~ms 級、同 LAN ~100-300 ms、公網經 TURN candidate 1-3 秒、慢網路上 5-10 秒。
+- **DTLS handshake** 還會再多一個 round-trip。
+- **`ice_servers` 要同時帶 STUN 跟 TURN**：
+
+  ```javascript
+  ice_servers: [
+      "stun:stun.l.google.com:19302",
+      "turn:turn-user:turn-pass@turn.example.com:3478",
+      "turns:turn-user:turn-pass@turn.example.com:5349",  // TURN over TLS
+  ]
+  ```
+
+  自架可用 [coturn](https://github.com/coturn/coturn)，雲端服務有 Twilio NAT Traversal、Cloudflare TURN、Xirsys。免費 public STUN 沒問題；**免費 public TURN 不要用** — 都有流量限制或不穩定。
+- **Library 不會幫你診斷 NAT 失敗**。peer 連不上 ICE 時，`WebRtcClient` 只是永遠不會到 `state === "open"`。在 app code 自己設 connection timeout，提示「WebRTC connection failed (check NAT/TURN config)」。
+- **Signaling 是你自己的責任** — library 的 `WebRtcSignalingChannel` 只是協定形狀（offer/answer/candidate）。實際部署通常用一個小型 WebSocket signaling service 在 peer 之間轉訊息；walkthrough 用 in-process EventEmitter 只是因為測試裡沒有真的網路。
+
+browser 當 peer 的場景，請看本 README 開頭的 Node-only 警告 — *signaling* 那端可以是 browser（browser 原生支援 WebRTC），但 *Node 端*的 connection 還是要跑這個 library。
 
 ### 協定（v2）
 

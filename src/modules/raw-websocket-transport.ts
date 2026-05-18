@@ -100,6 +100,11 @@ class WsConnectionMux {
                 return;
             }
             case "ack": {
+                // D5: route by `ns` when present (mux mode). See raw-tcp-transport.ts for full context.
+                if (this._mode === "mux" && typeof env.ns === "string") {
+                    this._transports.get(env.ns)?._dispatch_ack(env);
+                    return;
+                }
                 for (const t of this._transports.values()) t._dispatch_ack(env);
                 return;
             }
@@ -165,7 +170,8 @@ class RawWebSocketServerTransport extends AbsTransport {
         this._label = label;
         this._mux = mux;
         this._credential = credential;
-        process.nextTick(() => this._fire_lifecycle("connect"));
+        // F13: setImmediate (not process.nextTick) so Promise.then / await attach also catches.
+        setImmediate(() => this._fire_lifecycle("connect"));
     }
 
     get id(): string { return this._id; }
@@ -233,7 +239,9 @@ class RawWebSocketServerTransport extends AbsTransport {
         if (listeners === undefined || listeners.size === 0) return;
         const ack_id: number | undefined = typeof env.ack === "number" ? env.ack : undefined;
         const ack_cb: TransportAckCallback | undefined = ack_id !== undefined
-            ? (r) => this._mux.send_envelope({ k: "ack", ack: ack_id, r })
+            ? (r) => this._mux.send_envelope(this._mux.mode === "mux"
+                  ? { k: "ack", ns: this._label, ack: ack_id, r }
+                  : { k: "ack", ack: ack_id, r })
             : undefined;
         for (const l of listeners) { try { l(env.p, ack_cb); } catch { /* isolated */ } }
     }
@@ -352,6 +360,8 @@ export class RawWebSocketServer extends AbsTransportServer {
             }
         );
         this._connections.add(mux);
+        // D7: prune connection on ws close so long-running servers don't accumulate dead muxes.
+        ws.on("close", (): void => { this._connections.delete(mux); });
     }
 
     private _find_endpoint(label: string): RawWebSocketEndpoint | null {

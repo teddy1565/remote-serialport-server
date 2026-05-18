@@ -802,7 +802,7 @@ export class RemoteSerialServerSocket extends AbsRemoteSerialServerSocket {
         if (this._resume_timer !== null) {
             return;
         }
-        this._resume_timer = setTimeout((): void => {
+        const t: ReturnType<typeof setTimeout> = setTimeout((): void => {
             this._resume_timer = null;
             if (this._wire_paused === false || this._session === null) {
                 return;
@@ -814,6 +814,13 @@ export class RemoteSerialServerSocket extends AbsRemoteSerialServerSocket {
                 this._schedule_resume_check();
             }
         }, WIRE_BACKPRESSURE_POLL_MS);
+        // T4: don't keep the process alive just for the wire-backpressure poll. The poll fires
+        // again on each emit even if there's no listener, and disconnect cleanup clears it
+        // explicitly — `.unref()` is consistent with D3/D4/index.ts unref'd timers.
+        if (typeof (t as { unref?: () => void }).unref === "function") {
+            (t as { unref: () => void }).unref();
+        }
+        this._resume_timer = t;
     }
 
     private _get_buffered_amount(): number {

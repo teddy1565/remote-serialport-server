@@ -34,7 +34,7 @@
 export type Envelope =
     | { k: "hello"; label: string; auth?: unknown; ns?: string }
     | { k: "msg"; ns?: string; ch: string; p?: unknown; ack?: number; _binloc?: "p" | "p.data" }
-    | { k: "ack"; ack: number; r?: unknown }
+    | { k: "ack"; ns?: string; ack: number; r?: unknown }
     | { k: "bye"; ns?: string };
 
 const HEADER_BYTES = 4;

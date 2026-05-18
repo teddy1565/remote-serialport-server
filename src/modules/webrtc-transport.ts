@@ -10,6 +10,7 @@ import {
     TransportMessageListener
 } from "../types/remote-serialport-types/src/transport";
 import { Logger } from "../types/remote-serialport-types/src/logger";
+import { WebRtcSignalingChannel, WebRtcSignalingMessage } from "../types/remote-serialport-types/src/webrtc";
 import { default_logger } from "./logger";
 import { Envelope, FrameDecoder, encode } from "./shared/envelope-codec";
 
@@ -25,21 +26,10 @@ import { Envelope, FrameDecoder, encode } from "./shared/envelope-codec";
  * namespaces over one peer just means opening multiple DataChannels.
  */
 
-export interface WebRtcSignalingMessage {
-    kind: "offer" | "answer" | "candidate";
-    peer_id: string;
-    sdp?: string;
-    sdp_type?: "offer" | "answer";
-    candidate?: string;
-    mid?: string;
-}
-
-export interface WebRtcSignalingChannel {
-    /** Called on every inbound signaling message from a remote peer. */
-    on_message(handler: (msg: WebRtcSignalingMessage) => void): void;
-    /** Send a signaling message TO a specific remote peer. */
-    send(msg: WebRtcSignalingMessage): void;
-}
+// Re-export the shared signaling types so existing `import { WebRtcSignalingChannel } from
+// "node-serialport-server"` paths keep resolving without forcing consumers to touch the types
+// submodule. The single source of truth lives in `remote-serialport-types/src/webrtc.ts`.
+export { WebRtcSignalingChannel, WebRtcSignalingMessage };
 
 export interface WebRtcServerOptions {
     signaling: WebRtcSignalingChannel;
@@ -83,7 +73,8 @@ class WebRtcServerTransport extends AbsTransport {
         });
         dc.onClosed(() => this._on_remote_close());
         dc.onError((err: string) => this._logger.debug(`webrtc dc ${this._label} err: ${err}`));
-        process.nextTick(() => this._fire_lifecycle("connect"));
+        // F13: setImmediate (not process.nextTick) for sync + Promise.then + await symmetry.
+        setImmediate(() => this._fire_lifecycle("connect"));
     }
 
     get id(): string { return this._id; }
@@ -266,6 +257,19 @@ export class WebRtcServer extends AbsTransportServer {
         peer.onLocalCandidate((candidate: string, mid: string) => {
             this._opts.signaling.send({ kind: "candidate", peer_id, candidate, mid });
         });
+        // D8: prune the peer from `_peers` and release its native handles (DTLS/ICE/SCTP) on
+        // terminal states. `disconnected` is transient (ICE can recover) so we keep it; only
+        // `failed` and `closed` indicate the peer is permanently done.
+        try {
+            (peer as unknown as { onStateChange: (cb: (state: string) => void) => void }).onStateChange((state: string): void => {
+                if (state === "failed" || state === "closed") {
+                    if (this._peers.get(peer_id) === peer) {
+                        this._peers.delete(peer_id);
+                    }
+                    try { peer.close(); } catch { /* already closed */ }
+                }
+            });
+        } catch { /* older node-datachannel without onStateChange — no-op */ }
         return peer;
     }
 

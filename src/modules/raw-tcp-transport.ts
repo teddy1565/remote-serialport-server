@@ -141,10 +141,15 @@ class ConnectionMux {
                 return;
             }
             case "ack": {
-                // Find any transport carrying this ack id. In mux mode ack envelopes are NOT
-                // ns-tagged — RPCs from server to client are tracked per-transport but client
-                // → server RPCs are rare in our protocol. We broadcast the ack to all transports
-                // on this connection and let each ignore unrecognised ids.
+                // Route by `ns` when present (mux mode) — ack_id counters are per-transport so
+                // two transports on the same mux can have a pending ack with the same id; the
+                // pre-D5 broadcast loop resolved the wrong promise. Single-namespace mode and
+                // legacy peers that omit `ns` fall back to dispatch on the sole transport.
+                if (this._mode === "mux" && typeof env.ns === "string") {
+                    const t: RawTcpServerTransport | undefined = this._transports.get(env.ns);
+                    t?._dispatch_ack(env);
+                    return;
+                }
                 for (const t of this._transports.values()) t._dispatch_ack(env);
                 return;
             }
@@ -214,8 +219,11 @@ class RawTcpServerTransport extends AbsTransport {
         this._label = label;
         this._mux = mux;
         this._credential = credential;
-        // Fire 'connect' on next tick so subscribers added immediately after construction observe it.
-        process.nextTick((): void => this._fire_lifecycle("connect"));
+        // F13: fire 'connect' via setImmediate (not process.nextTick) so subscribers attached
+        // through Promise.then / await chains also observe it. nextTick fires BEFORE microtasks
+        // (Promise continuations); setImmediate fires AFTER, so it works for sync + Promise +
+        // await attach patterns uniformly. Negligible extra delay (one event-loop tick).
+        setImmediate((): void => this._fire_lifecycle("connect"));
     }
 
     get id(): string { return this._id; }
@@ -298,7 +306,12 @@ class RawTcpServerTransport extends AbsTransport {
         const ack_id: number | undefined = typeof env.ack === "number" ? env.ack : undefined;
         const ack_cb: TransportAckCallback | undefined = ack_id !== undefined
             ? (response: unknown): void => {
-                  const reply_env: Envelope = { k: "ack", ack: ack_id, r: response };
+                  // Tag ack with our `ns` in mux mode so the peer's ConnectionMux routes the
+                  // ack back to the originating transport (per-transport ack id counters can
+                  // collide otherwise — see D5).
+                  const reply_env: Envelope = this._mux.mode === "mux"
+                      ? { k: "ack", ns: this._label, ack: ack_id, r: response }
+                      : { k: "ack", ack: ack_id, r: response };
                   this._mux.send_envelope(reply_env);
               }
             : undefined;
@@ -476,6 +489,9 @@ export class RawTcpServer extends AbsTransportServer {
             }
         );
         this._connections.add(mux);
+        // D7: prune the connection from the parent server's tracking Set on socket close so
+        // long-running servers with high churn don't accumulate dead ConnectionMux objects.
+        socket.on("close", (): void => { this._connections.delete(mux); });
     }
 
     private _find_endpoint(label: string): RawTcpEndpoint | null {
