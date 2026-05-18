@@ -1,20 +1,20 @@
 {
     "name": "node-serialport-server",
-    "version": "0.0.8",
-    "description": "Remote serialport server, Current In Developing",
+    "version": "0.1.0",
+    "description": "Remote serialport server",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
     "files": [
         "dist"
     ],
     "scripts": {
-        "test": "tsc --project ./tsconfig-test.json && cd ./dist-test/test && node ./test.js",
+        "test": "npm run ci-test",
         "start": "npm run test",
         "build-test": "tsc --project ./tsconfig-test.json",
         "build-prod": "tsc --project ./tsconfig.json",
         "build": "npm run build-prod",
         "build-and-publish": "tsc --build && npm publish",
-        "ci-test": "jest"
+        "ci-test": "jest --forceExit"
     },
     "repository": {
         "type": "git",
@@ -27,6 +27,7 @@
         "@types/express": "^4.17.21",
         "@types/jest": "^29.5.12",
         "@types/node": "^20.11.19",
+        "@types/ws": "^8.18.1",
         "@typescript-eslint/eslint-plugin": "^7.0.2",
         "@typescript-eslint/parser": "^7.0.2",
         "eslint": "^8.56.0",
@@ -34,7 +35,13 @@
         "ts-jest": "^29.1.2"
     },
     "dependencies": {
+        "@grpc/grpc-js": "^1.14.3",
+        "@grpc/proto-loader": "^0.8.1",
+        "aedes": "^0.51.3",
+        "mqtt": "^5.15.1",
+        "node-datachannel": "^0.32.3",
         "serialport": "^12.0.0",
-        "socket.io": "^4.7.5"
+        "socket.io": "^4.7.5",
+        "ws": "^8.11.0"
     }
 }

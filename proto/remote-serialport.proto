@@ -1,0 +1,18 @@
+// Wire schema for the gRPC transport. Each bi-directional Channel RPC corresponds to one
+// `AbsTransport` instance (one namespace). The `frame` bytes are an opaque
+// length-prefix-encoded envelope produced by `shared/envelope-codec.ts` — gRPC just carries
+// them transparently so we don't have to maintain two parallel codecs.
+//
+// Auth and the namespace label travel in stream-opening metadata (gRPC's call headers), not in
+// the protobuf body. See `grpc-transport.ts` for which metadata keys are consumed.
+
+syntax = "proto3";
+package remote_serialport.v2;
+
+service RemoteSerialport {
+    rpc Channel(stream Envelope) returns (stream Envelope);
+}
+
+message Envelope {
+    bytes frame = 1;
+}
